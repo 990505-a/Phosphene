@@ -390,6 +390,77 @@ module.exports = {
       }
     },
 
+    // ---- Colorize IC-LoRA (~0.3 GB, un-gated community weights) -----------
+    // Powers the Colorize restore mode (B&W clip → color). UN-GATED, so no
+    // HF token is needed — but BEST-EFFORT regardless: a network hiccup (or a
+    // future gating change) must NEVER fail the core video install. The panel
+    // surfaces the same Repair path if the file didn't land, and the worker
+    // falls back to resolving the repo id at first use. Lands the file at
+    // mlx_models/loras/ic/ (matches required_files.json → repos[ic_colorize]
+    // + CURATED_LORAS["colorize"].local_path).
+    {
+      method: "shell.run",
+      params: {
+        venv: "env",
+        path: "ltx-2-mlx",
+        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
+        message: [
+          "echo 'Fetching the Colorize IC-LoRA (restore mode, ~0.3 GB, optional)…' && \\",
+          "hf download DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer --local-dir ../mlx_models/loras/ic --include 'LTX-2.3-22b-IC-LoRA-Colorizer-0.9.safetensors' \\",
+          "|| echo 'WARN: Colorize IC-LoRA fetch failed — video + image still work; the Colorize mode will fetch it on first use, or click Repair.'"
+        ].join("\n")
+      }
+    },
+
+    // ---- Ingredients IC-LoRA (~1.3 GB, un-gated mirror) -------------------
+    // Powers the flagship Ingredients mode (2-8 refs → one composed clip).
+    // The official Lightricks weight is GATED; DeepBeepMeep/LTX-2 carries the
+    // BYTE-IDENTICAL file un-gated, so no HF token is needed. BEST-EFFORT: a
+    // hiccup must never fail the core video install. CRITICAL: --include pulls
+    // ONLY the one ingredients file — DeepBeepMeep/LTX-2 is a ~708 GB mega-repo,
+    // so a bare `hf download` of it would be catastrophic. The worker falls
+    // back to a targeted single-file fetch at first use; the panel surfaces
+    // Repair. Lands the file at mlx_models/loras/ic/ (matches
+    // required_files.json → repos[ic_ingredients] +
+    // CURATED_LORAS["ingredients"].local_path).
+    {
+      method: "shell.run",
+      params: {
+        venv: "env",
+        path: "ltx-2-mlx",
+        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
+        message: [
+          "echo 'Fetching the Ingredients IC-LoRA (multi-reference mode, ~1.3 GB, optional)…' && \\",
+          "hf download DeepBeepMeep/LTX-2 --local-dir ../mlx_models/loras/ic --include 'ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors' \\",
+          "|| echo 'WARN: Ingredients IC-LoRA fetch failed — video + image still work; the Ingredients mode will fetch it on first use, or click Repair.'"
+        ].join("\n")
+      }
+    },
+
+    // ---- Control (Union) IC-LoRA (~0.65 GB, OFFICIAL + un-gated) ----------
+    // Powers the Control mode (drive motion/structure/composition from a
+    // control video). This is the OFFICIAL Lightricks weight AND it is UN-GATED
+    // + public, so — unlike Ingredients — no token, no mirror, no mega-repo
+    // workaround: a plain single-file `hf download --include`, exactly like the
+    // Colorize fetch above. BEST-EFFORT: a hiccup must never fail the core
+    // video install. The worker falls back to resolving the repo id at first
+    // use; the panel surfaces Repair. Lands the file at mlx_models/loras/ic/
+    // (matches required_files.json → repos[ic_union_control] +
+    // CURATED_LORAS["union-control"].local_path).
+    {
+      method: "shell.run",
+      params: {
+        venv: "env",
+        path: "ltx-2-mlx",
+        env: { HF_HUB_ENABLE_HF_TRANSFER: "1" },
+        message: [
+          "echo 'Fetching the Control IC-LoRA (Union, control mode, ~0.65 GB, optional)…' && \\",
+          "hf download Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control --local-dir ../mlx_models/loras/ic --include 'ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors' \\",
+          "|| echo 'WARN: Control IC-LoRA fetch failed — video + image still work; the Control mode will fetch it on first use, or click Repair.'"
+        ].join("\n")
+      }
+    },
+
     // ---- Done -------------------------------------------------------------
     {
       method: "notify",

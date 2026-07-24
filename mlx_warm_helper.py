@@ -102,6 +102,36 @@ MODEL_UPSCALE_ENABLED = os.environ.get("LTX_ENABLE_MODEL_UPSCALE", "").lower() i
 _USER_VAE_STREAMING_OVERRIDE = os.environ.get("LTX_VAE_STREAMING")
 
 
+def _log_memory_pressure() -> None:
+    """Emit a log line with current memory stats for diagnosing GPU timeouts."""
+    try:
+        import subprocess, re
+        total = int(subprocess.run(["sysctl", "-n", "hw.memsize"],
+            capture_output=True, text=True, timeout=1).stdout.strip())
+        vm = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=1).stdout
+        m = re.search(r"page size of (\d+)", vm)
+        page_size = int(m.group(1)) if m else 16384
+        def pages(name: str) -> int:
+            mm = re.search(rf"{re.escape(name)}:\s+(\d+)", vm)
+            return int(mm.group(1)) if mm else 0
+        used_bytes = (pages("Pages active") + pages("Pages wired down")
+                      + pages("Pages occupied by compressor")) * page_size
+        used_gb = used_bytes / 1024**3
+        pct = round(used_bytes / total * 100) if total else 0
+        emit({"event": "log", "line": f"[mem] used={used_gb:.1f}G/{total/1024**3:.0f}G ({pct}%)"})
+    except Exception:
+        pass
+
+
+def _aggressive_cleanup_before_generate() -> None:
+    """Minimize Metal heap fragmentation before pipeline generation."""
+    try:
+        from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+        _ac()
+    except Exception:
+        pass
+
+
 def _apply_vae_streaming_decision(num_frames: int) -> None:
     """Set/unset os.environ['LTX_VAE_STREAMING'] for the upcoming decode.
     No-op if the user pinned a value at helper start time. Threshold reads
@@ -236,6 +266,8 @@ _hq_model_dir = None     # remember which model the HQ pipe was built against
 _a2v_pipe = None         # A2VidPipelineTwoStage (Q8 dev + distilled LoRA stage 2)
 _a2v_model_dir = None    # which model the A2V pipe was built against
 _a2v_lora_key: tuple | None = None  # LoRA fingerprint for current A2V cache
+_a2v_distilled_pipe = None   # A2VidDistilledPipeline (Q4 distilled, no CFG)
+_a2v_distilled_model_dir = None
 _pipe_lock = threading.Lock()
 
 
@@ -321,6 +353,7 @@ def release_pipelines(keep_kind=None):
     """
     global _t2v_pipe, _i2v_pipe, _extend_pipe, _hq_pipe, _kf_pipe, _hq_model_dir, _kf_model_dir
     global _a2v_pipe, _a2v_model_dir
+    global _a2v_distilled_pipe, _a2v_distilled_model_dir
     global _gemma_lm
     try:
         from ltx_core_mlx.utils.memory import aggressive_cleanup
@@ -340,6 +373,8 @@ def release_pipelines(keep_kind=None):
         _kf_pipe = None; _kf_model_dir = None; freed.append("Keyframe")
     if keep_kind != "a2v" and _a2v_pipe is not None:
         _a2v_pipe = None; _a2v_model_dir = None; freed.append("A2V")
+    if keep_kind != "a2v_distilled" and _a2v_distilled_pipe is not None:
+        _a2v_distilled_pipe = None; _a2v_distilled_model_dir = None; freed.append("A2V-distilled")
     # Always free Gemma LanguageModel when releasing for any pipeline —
     # ~6 GB persistent that competes with the dev transformer's headroom.
     # Re-loaded on demand by the next enhance call (one-time ~10s cost).
@@ -1079,6 +1114,44 @@ def get_a2v_pipe(model_dir: str, loras: list[dict] | None = None):
             _a2v_model_dir = model_dir
             _a2v_lora_key = fp
         return _a2v_pipe
+
+
+def get_a2v_distilled_pipe(model_dir: str):
+    """Returns A2VidDistilledPipeline lazily.
+
+    Q4-compatible distilled pipeline — no dev transformer, no CFG, 8+3 steps.
+    Cached on model_dir so switching between Q4 and Q8 paths rebuilds.
+    """
+    global _a2v_distilled_pipe, _a2v_distilled_model_dir
+    try:
+        from a2vid_distilled import A2VidDistilledPipeline
+    except ModuleNotFoundError:
+        raise RuntimeError(
+            "A2V distilled module not found — run Update to install it."
+        ) from None
+
+    _install_a2v_frame_rate_patch()
+
+    try:
+        from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+    except Exception:
+        _ac = lambda: None
+    with _pipe_lock:
+        release_pipelines(keep_kind="a2v_distilled")
+        if _a2v_distilled_pipe is None or _a2v_distilled_model_dir != model_dir:
+            if _a2v_distilled_pipe is not None:
+                emit({"event": "log", "line": "model_dir changed; reloading A2V distilled pipeline."})
+                _a2v_distilled_pipe = None
+                _ac()
+            emit({"event": "log",
+                  "line": f"Loading A2V distilled pipeline (Q4 — {model_dir})..."})
+            _a2v_distilled_pipe = A2VidDistilledPipeline(
+                model_dir=model_dir,
+                gemma_model_id=GEMMA_PATH,
+                low_memory=LOW_MEMORY,
+            )
+            _a2v_distilled_model_dir = model_dir
+        return _a2v_distilled_pipe
 
 
 # ---- prompt enhancement (Gemma language model) ------------------------------
@@ -1895,6 +1968,7 @@ for line in sys.__stdin__:
                       "line": f"step:get_pipe kind={('i2v' if needs_image else 't2v')}"})
             pipe = get_pipe("i2v" if needs_image else "t2v", loras=loras)
             emit({"event": "log", "line": "step:get_pipe done"})
+            _log_memory_pressure()
             accel_mode = configure_acceleration(p.get("accel", "off"))
             negative_prompt = _clean_text(p.get("negative_prompt"))
             effective_prompt = _prompt_with_soft_negative(p["prompt"], negative_prompt)
@@ -1958,6 +2032,7 @@ for line in sys.__stdin__:
                 elif not upscaler_available():
                     emit({"event": "log", "line": "Sharper upscale requested but model weights missing — falling back to Lanczos."})
 
+            _aggressive_cleanup_before_generate()
             if use_model_upscale:
                 emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps steps={kwargs['num_steps']} accel={accel_mode} upscale=model"})
                 # Step 1: generate latents (no save)
@@ -1981,7 +2056,8 @@ for line in sys.__stdin__:
                 # panel's wait_done while MLX tears down ~10 GB of Metal
                 # buffers + lazy graph nodes synchronously.
                 emit({"event": "log", "line": "step:decode_and_save done"})
-            else:
+            _aggressive_cleanup_before_generate()
+            if not use_model_upscale:
                 emit({"event": "log", "line": f"step:generate mode={mode} {kwargs['width']}x{kwargs['height']} {kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps steps={kwargs['num_steps']} accel={accel_mode}"})
                 video_latent, audio_latent = _generate_latents(pipe, needs_image=needs_image, kwargs=kwargs)
                 emit({"event": "log", "line": "step:generate done"})
@@ -2180,9 +2256,13 @@ for line in sys.__stdin__:
                 stage1_steps=int(p.get("stage1_steps", 15)),
                 stage2_steps=int(p.get("stage2_steps", 3)),
                 cfg_scale=float(p.get("cfg_scale", 3.0)),
-                # Default 0.0 — upstream HQ (TwoStageHQPipeline) uses empty
-                # stg_blocks, so any nonzero stg_scale just runs an extra
-                # forward pass per step that's then discarded.
+                # STG (Spatio-Temporal Guidance) — "detail guidance" slider.
+                # Default 0.0 = OFF. The pipeline forces stg_blocks=[] when no
+                # explicit guider params are passed, so stg_scale alone is a
+                # no-op (an extra forward pass per step that's then discarded).
+                # When stg_scale>0 we ALSO pass explicit video/audio guider
+                # params with stg_blocks=[28] just below, which is what makes
+                # the knob actually do something on the HQ path.
                 stg_scale=float(p.get("stg_scale", 0.0)),
                 enable_teacache=bool(p.get("enable_teacache", True)),
                 teacache_thresh=float(p.get("teacache_thresh", 1.0)),
@@ -2207,6 +2287,36 @@ for line in sys.__stdin__:
                     p.get("stage2_image_conditioning", "full")
                 ),
             )
+            # STG engage: stg_scale>0 only bites if stg_blocks is non-empty.
+            # The HQ pipeline forces stg_blocks=[] in its own default guider
+            # params, so we hand it explicit params with stg_blocks=[28] (the
+            # block the one/two-stage pipelines perturb). Mirror the pipeline's
+            # other defaults verbatim (cfg/rescale/modality) so STG is the only
+            # thing that changes. At stg_scale<=0 we pass nothing → the pipeline
+            # builds its own [] params → byte-identical to the pre-slider path.
+            _stg = float(kwargs.get("stg_scale", 0.0))
+            if _stg > 0.0:
+                try:
+                    from ltx_core_mlx.components.guiders import MultiModalGuiderParams
+                    kwargs["video_guider_params"] = MultiModalGuiderParams(
+                        cfg_scale=float(kwargs.get("cfg_scale", 3.0)),
+                        stg_scale=_stg,
+                        rescale_scale=0.45,
+                        modality_scale=3.0,
+                        stg_blocks=[28],
+                    )
+                    kwargs["audio_guider_params"] = MultiModalGuiderParams(
+                        cfg_scale=7.0,
+                        stg_scale=_stg,
+                        rescale_scale=1.0,
+                        modality_scale=3.0,
+                        stg_blocks=[28],
+                    )
+                    emit({"event": "log", "line": f"STG detail guidance ON — stg_scale={_stg:g}, stg_blocks=[28]"})
+                except Exception as _stg_exc:
+                    # Never let STG wiring block a render — fall back to the
+                    # plain (STG-off) HQ path if the import/shape ever drifts.
+                    emit({"event": "log", "line": f"STG setup skipped ({_stg_exc}); rendering without STG."})
             img = p.get("image")
             if img:
                 if not os.path.exists(img):
@@ -2474,6 +2584,79 @@ for line in sys.__stdin__:
             _is_busy = False
         continue
 
+    if action == "generate_a2v_distilled":
+        # Audio-to-Video via the Q4 distilled pipeline (no dev transformer,
+        # no CFG, 8+3 steps). Fits 24 GB systems where Q8 dev doesn't.
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        model_dir = p.get("model_dir") or MODEL_ID
+        seed = int(p.get("seed", -1))
+        if seed == -1:
+            seed = random.randint(0, 2**31 - 1)
+        _is_busy = True
+        try:
+            t0 = time.time()
+            configure_acceleration("off")
+            audio_path = p.get("audio_path") or ""
+            if not audio_path:
+                raise RuntimeError("audio_path is required for A2V")
+            if not os.path.exists(audio_path):
+                raise RuntimeError(f"audio file not found: {audio_path}")
+            num_frames = int(p["frames"])
+            pipe = get_a2v_distilled_pipe(model_dir)
+            _apply_vae_streaming_decision(num_frames)
+            kwargs = dict(
+                prompt=p["prompt"],
+                output_path=p["output_path"],
+                audio_path=audio_path,
+                height=int(p["height"]),
+                width=int(p["width"]),
+                num_frames=num_frames,
+                frame_rate=float(p.get("frame_rate", 24.0)),
+                seed=seed,
+                stage1_steps=int(p.get("stage1_steps", 8)),
+                stage2_steps=int(p.get("stage2_steps", 3)),
+                audio_start_time=float(p.get("audio_start_time", 0.0)),
+                audio_conditioning_scale=float(p.get("audio_conditioning_scale", 1.0)),
+            )
+            ref_image = p.get("image") or None
+            if ref_image:
+                if not os.path.exists(ref_image):
+                    raise RuntimeError(f"reference image not found: {ref_image}")
+                kwargs["image"] = ref_image
+            amd = p.get("audio_max_duration")
+            if amd is not None:
+                try:
+                    kwargs["audio_max_duration"] = float(amd)
+                except (TypeError, ValueError):
+                    pass
+            emit({
+                "event": "log",
+                "line": (
+                    f"step:generate_a2v_distilled {kwargs['width']}x{kwargs['height']} "
+                    f"{kwargs['num_frames']}f @{kwargs['frame_rate']:.1f}fps "
+                    f"stage1={kwargs['stage1_steps']} stage2={kwargs['stage2_steps']} "
+                    f"audio={os.path.basename(audio_path)}"
+                    f" a2v_scale={kwargs.get('audio_conditioning_scale', 1.0)}"
+                    f"{' image=' + os.path.basename(ref_image) if ref_image else ''}"
+                ),
+            })
+            kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
+            out_path = pipe.generate_and_save(**kwargs)
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "output": str(out_path), "elapsed_sec": elapsed,
+                "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
     if action == "generate_hdr":
         # HDR via IC-LoRA. Phase 1 of IC-LoRA support in Phosphene.
         # Uses HDRICLoraPipeline from ltx_pipelines_mlx.hdr_ic_lora —
@@ -2549,6 +2732,147 @@ for line in sys.__stdin__:
             # Drop the HDRICLoraPipeline aggressively — we don't cache
             # it the way we do t2v/i2v because HDR jobs are rare and
             # the pipeline's DiT+upsampler+decoders cost is substantial.
+            try:
+                pipe = None
+                from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac
+                _ac()
+            except Exception:
+                pass
+            elapsed = round(time.time() - t0, 2)
+            _last_activity = time.time()
+            emit({
+                "event": "done", "id": job_id,
+                "output": str(out_path), "elapsed_sec": elapsed,
+                "seed_used": seed,
+            })
+        except Exception as exc:
+            _last_activity = time.time()
+            emit({"event": "error", "id": job_id, "error": str(exc), "trace": traceback.format_exc()})
+        finally:
+            _is_busy = False
+        continue
+
+    if action == "generate_restore":
+        # IC-LoRA reference-conditioned render. Serves TWO panel modes through
+        # one code path (both fuse an IC-LoRA + ride a source clip on the IC
+        # reference channel via ICLoraPipeline):
+        #   - Colorize (mode=restore): the source is a B&W clip; LoRA strength
+        #     1.0; two-stage (skip_stage_2 unset). The first real IC-LoRA
+        #     feature on un-gated weights (DoctorDiffusion Colorizer).
+        #   - Ingredients (mode=ingredients): the "source" is the reference
+        #     SHEET looped to N frames (the panel composes + writes it); LoRA
+        #     strength 1.4; single-stage (skip_stage_2=True). Flagship
+        #     multi-reference composition.
+        # Mechanically this mirrors generate_hdr but with TWO deliberate
+        # differences:
+        #   (a) ICLoraPipeline (ltx_pipelines_mlx.ic_lora), NOT
+        #       HDRICLoraPipeline. The community Colorize LoRA carries no
+        #       hdr_transform metadata — only reference_downscale_factor=1 —
+        #       so the LogC3 inverse + HDR .npz companion the HDR class adds
+        #       would be wrong here. ICLoraPipeline fuses the LoRA, runs the
+        #       two-stage walk, and writes a plain SDR mp4.
+        #   (b) A non-empty SOURCE video is REQUIRED. It rides the IC
+        #       reference channel as video_conditioning=[(src, strength)] —
+        #       the B&W clip the user wants colorized. (HDR Phase 1 ran
+        #       text-driven with video_conditioning=[].) Verified on MLX by
+        #       the de-risk render (scratchpad/ic_colorize_smoke.py).
+        #
+        # Routing: like HDR, the LoRA was trained against the Q4 distilled
+        # checkpoint, so the panel forces model_dir onto the Q4 distilled
+        # folder. ffprobe (probe_video_info, called inside generate_and_save
+        # for the reference video) needs FFMPEG_BIN on PATH — the helper
+        # inherits it from the panel (mlx_ltx_panel.py:5008).
+        job_id = msg.get("id", "?")
+        p = msg.get("params", {}) or {}
+        model_dir = p.get("model_dir") or MODEL_ID
+        seed = int(p.get("seed", -1))
+        if seed == -1:
+            seed = random.randint(0, 2**31 - 1)
+        _is_busy = True
+        try:
+            t0 = time.time()
+            configure_acceleration("off")
+            from ltx_pipelines_mlx.ic_lora import ICLoraPipeline
+            loras = p.get("loras") or []
+            if not loras:
+                raise RuntimeError(
+                    "Restore job requires the Colorize IC-LoRA in `loras`. The "
+                    "panel should have injected the curated colorize LoRA."
+                )
+            # A source video is mandatory — it IS the IC reference channel.
+            video_conditioning = p.get("video_conditioning") or []
+            if not video_conditioning:
+                raise RuntimeError(
+                    "Restore (Colorize) requires a source video. The panel "
+                    "should have set video_conditioning=[(src, strength)] from "
+                    "restore_video_path."
+                )
+            # Resolve each LoRA path (HF repo id → local safetensors via
+            # snapshot_download + largest-file pick; absolute path → pass-through).
+            resolved = [
+                (_resolve_lora_path(str(l["path"])), float(l.get("strength", 1.0)))
+                for l in loras
+            ]
+            num_frames = int(p["frames"])
+            _apply_vae_streaming_decision(num_frames)
+            # Tear down any existing cached pipeline before instantiating
+            # ICLoraPipeline — it loads its own DiT + VAE at init, so holding
+            # the t2v / i2v caches just doubles the memory footprint.
+            release_pipelines("restore render incoming")
+            pipe = ICLoraPipeline(
+                model_dir=Path(model_dir),
+                lora_paths=resolved,
+                low_memory=LOW_MEMORY,
+            )
+            emit({"event": "log",
+                  "line": f"step:generate_restore {p['width']}x{p['height']} "
+                          f"{num_frames}f @{float(p.get('frame_rate', 24.0)):.1f}fps "
+                          f"stage1={int(p.get('stage1_steps', 8))} "
+                          f"stage2={int(p.get('stage2_steps', 3))} "
+                          f"loras={len(resolved)} "
+                          f"ref_videos={len(video_conditioning)} "
+                          f"ref_strengths={[round(float(s), 3) for _, s in video_conditioning]} "
+                          f"ref_downscale={getattr(pipe, 'reference_downscale_factor', '?')}"})
+            kwargs = dict(
+                prompt=p["prompt"],
+                output_path=p["output_path"],
+                video_conditioning=video_conditioning,
+                height=int(p["height"]),
+                width=int(p["width"]),
+                num_frames=num_frames,
+                frame_rate=float(p.get("frame_rate", 24.0)),
+                seed=seed,
+                stage1_steps=int(p.get("stage1_steps", 8)),
+                stage2_steps=int(p.get("stage2_steps", 3)),
+            )
+            # Ingredients (multi-reference) reuses this same action but runs the
+            # public Space's single-stage recipe — skip_stage_2=True, generated
+            # at 2x the sheet resolution. Colorize leaves this False (two-stage),
+            # so restore stays byte-identical. Only set the kwarg when the panel
+            # asked for it, so the pipeline default still wins otherwise.
+            if p.get("skip_stage_2"):
+                kwargs["skip_stage_2"] = True
+            kwargs = _filter_unsupported_kwargs(pipe.generate_and_save, kwargs)
+            # Ingredients is single-stage ONLY (the public Space's recipe). If the
+            # imported pipeline package is an older/pinned build whose
+            # generate_and_save lacks `skip_stage_2`, _filter_unsupported_kwargs
+            # would have SILENTLY dropped it → a two-stage run whose clean,
+            # no-LoRA Stage 2 refines against the raw reference and collapses the
+            # output back to a faithful copy of the sheet (static, ~no motion).
+            # Fail loudly here instead of shipping that broken render. Colorize
+            # never sets skip_stage_2, so this guard is inert for it (byte-identical).
+            if p.get("skip_stage_2") and "skip_stage_2" not in kwargs:
+                raise RuntimeError(
+                    "Ingredients requires single-stage generation (skip_stage_2), "
+                    "but the imported ltx-pipelines-mlx build's generate_and_save "
+                    "does not accept it — it would silently run two-stage and "
+                    "produce a static copy of the reference sheet. Upgrade/repair "
+                    "the ltx-2-mlx pipeline (need a build with skip_stage_2; "
+                    "v0.14.8+ has it)."
+                )
+            out_path = pipe.generate_and_save(**kwargs)
+            # Drop the pipeline aggressively — restore jobs are rare and the
+            # DiT+VAE cost is substantial; don't cache it like t2v/i2v.
             try:
                 pipe = None
                 from ltx_core_mlx.utils.memory import aggressive_cleanup as _ac

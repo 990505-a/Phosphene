@@ -732,16 +732,113 @@ CURATED_LORAS: dict[str, dict] = {
         "is_curated": True,
         "is_hdr_toggle": False,
     },
+    # Control (Union) — drives a render's motion / structure / composition from
+    # a control video. This is the OFFICIAL Lightricks weight and — unlike the
+    # other official IC-LoRAs (Ingredients/Colorize gated or community-mirrored)
+    # — it is UN-GATED + public (verified gated:False, single 654,465,352-byte
+    # safetensors), so it downloads token-less exactly like Colorize. Drives the
+    # "Control" mode, not the LoRA picker — `is_control_lora` keeps it out of the
+    # user-facing curated list the way `is_restore_lora` hides Colorize. The
+    # worker injects it by `local_path` when mode=="control".
+    #
+    # Recon gate (2026-06-27) PROVED raw RGB on the IC reference channel at
+    # STRENGTH 1.0 transfers the driving clip's structure/composition onto the
+    # prompted subject (A/B causation confirmed vs no-control). Unlike Ingredients
+    # (ref strength 0.0 to RECOMPOSE), Control WANTS to follow the driver, so the
+    # reference is held near-pristine at ~1.0. Trained against the Q4 distilled
+    # checkpoint, so Control forces Q4 like Colorize/Ingredients/HDR. The weight
+    # carries reference_downscale_factor=2 → the IC encoder halves the reference
+    # and the pipeline generates at the requested dims (handled in iclora_utils;
+    # the panel feeds output dims and lets the encoder do the /2).
     "union-control": {
         "id": "union-control",
         "name": "Union Control",
-        "description": "Lightricks IC-LoRA combining multiple control signals "
-                       "(depth, edges, pose) into one network.",
+        "description": "Official Lightricks IC-LoRA combining multiple control "
+                       "signals (depth, edges, pose) into one network. Drives "
+                       "the Control mode; takes the control clip on the IC "
+                       "reference channel at follow-strength. Un-gated official "
+                       "weight — no HF token needed.",
         "repo_id": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
+        # Local file the installer fetches (see required_files.json →
+        # repos[ic_union_control] + install.js/update.js). Preferred over repo_id
+        # so the helper fuses a local .safetensors with no snapshot_download.
+        "local_path": str(LORAS_DIR / "ic" / "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"),
         "default_strength": 1.0,
         "trigger_words": [],
         "is_curated": True,
         "is_hdr_toggle": False,
+        "is_control_lora": True,        # hide from the LoRA picker (mode-driven)
+    },
+    # Colorize — the first real IC-LoRA feature, on UN-GATED community weights
+    # (DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer). Drives the "Colorize"
+    # (restore) mode, not the LoRA picker — `is_restore_lora` keeps it out of
+    # the user-facing curated list the way `is_hdr_toggle` hides HDR. The
+    # worker injects it by `local_path` when mode=="restore". The LoRA was
+    # trained against the Q4 distilled checkpoint, so restore forces Q4.
+    "colorize": {
+        "id": "colorize",
+        "name": "Colorize",
+        "description": "Community IC-LoRA that adds natural color to a B&W / "
+                       "desaturated source clip. Drives the Colorize restore "
+                       "mode; takes the source video on the IC reference "
+                       "channel. Un-gated — no HF token needed.",
+        "repo_id": "DoctorDiffusion/LTX-2.3-IC-LoRA-Colorizer",
+        # Local file the installer fetches (see required_files.json →
+        # repos[ic_colorize] + install.js/update.js). Preferred over repo_id so
+        # the helper fuses a local .safetensors with no snapshot_download.
+        "local_path": str(LORAS_DIR / "ic" / "LTX-2.3-22b-IC-LoRA-Colorizer-0.9.safetensors"),
+        "default_strength": 1.0,
+        "trigger_words": [],
+        "is_curated": True,
+        "is_hdr_toggle": False,
+        "is_restore_lora": True,        # hide from the LoRA picker (mode-driven)
+    },
+    # Ingredients — the FLAGSHIP multi-reference IC-LoRA. 2-8 reference images
+    # (a face + a prop + a location) are tiled into ONE "reference sheet", the
+    # sheet is repeated to N frames as the IC video_conditioning, and the model
+    # composes them into one new clip. Drives the "Ingredients" mode, not the
+    # LoRA picker — `is_ingredients_lora` keeps it out of the user-facing list
+    # the way `is_restore_lora` hides Colorize. Worker injects it by
+    # `local_path` when mode=="ingredients".
+    #
+    # WEIGHT: the OFFICIAL Lightricks weight is GATED (auto-approve). The
+    # un-gated community mirror DeepBeepMeep/LTX-2 carries the BYTE-IDENTICAL
+    # file (same 1,308,778,338-byte size; sha256
+    # 515e4e139001ac6282357a5b35372e42e98b3affd5fcc886a52242abeed19559;
+    # token-less download verified). BUT that mirror is a 708 GB mega-repo of
+    # 71 safetensors — NEVER hand its bare repo_id to _resolve_lora_path
+    # (snapshot_download would try to pull all 708 GB). So we set `repo_file`
+    # to the exact filename and the worker fetches that ONE file with
+    # hf_hub_download. `local_path` (installer-fetched) is always preferred.
+    #
+    # Recipe is the public Space ltx-community/ltx-2.3-ingredients-distilled:
+    # LoRA fuse strength 1.4 (NOT 1.0), single-stage (skip_stage_2=True), the
+    # sheet rides video_conditioning at strength 1.0, prompt is
+    # "Reference sheet: <desc>\n\nGenerated video: <action>". Trained against
+    # the Q4 distilled checkpoint → ingredients forces Q4 like Colorize/HDR.
+    "ingredients": {
+        "id": "ingredients",
+        "name": "Ingredients",
+        "description": "Official-equivalent IC-LoRA that composes 2-8 reference "
+                       "images (a face + a prop + a location) into one new "
+                       "video. Drives the Ingredients mode; the references are "
+                       "tiled into a sheet and ride the IC reference channel. "
+                       "Un-gated mirror — no HF token needed.",
+        # Un-gated mirror that carries the byte-identical official weight.
+        "repo_id": "DeepBeepMeep/LTX-2",
+        # Exact file WITHIN that mega-repo — the worker fetches ONLY this file
+        # (hf_hub_download), never the whole 708 GB repo.
+        "repo_file": "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+        # Local file the installer fetches (see required_files.json →
+        # repos[ic_ingredients] + install.js/update.js). Preferred over repo_id
+        # so the helper fuses a local .safetensors with no download.
+        "local_path": str(LORAS_DIR / "ic" / "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"),
+        # Public-Space fuse strength for the Ingredients LoRA (1.4, not 1.0).
+        "default_strength": 1.4,
+        "trigger_words": [],
+        "is_curated": True,
+        "is_hdr_toggle": False,
+        "is_ingredients_lora": True,    # hide from the LoRA picker (mode-driven)
     },
 }
 
@@ -856,12 +953,12 @@ LORA_LAB_RUN_SH = Path(
 # Quality preset → training hyperparams. lora_lab/train_character.py reads
 # these out of the spec JSON; the values here are the contract surface.
 #
-# Step counts are NOT hardcoded — they're derived from `epochs × image_count`
-# at job-build time (see make_job). The validated v2 recipe was 5000 steps
-# at 50 images = 100 epochs; that ratio is what each preset preserves as
-# the dataset grows. 79 images on "high" → 7900 steps, not 5000. Power
-# users can override per-run via the advanced "steps" field in the Train
-# tab — make_job honors form["steps"] when present.
+# Step counts are derived from `epochs × image_count` at job-build time
+# (see make_job), then capped by the active hardware training profile.
+# Unbounded epoch scaling made a 47-image Quick run launch 1410 full LTX
+# backward passes on a 48 GB Mac, which pushed MLX into swap and produced
+# a bogus multi-hour ETA. Presets now carry `max_steps`, and make_job also
+# clamps stale advanced form values server-side.
 #
 # `seconds_per_step` is the per-step wall-time measurement on M4 Max at the
 # preset's rank/resolution (1.75 s/step at rank-8 / 512×320 — see
@@ -871,12 +968,14 @@ TRAIN_PRESETS = {
                "seconds_per_step": 1.5,  "ram_peak_gb": 12,
                "label": "Quick",
                "subtitle": "~30 epochs · rank 8 · 512px",
-               "checkpoint_interval": 500},
+               "checkpoint_interval": 500,
+               "max_steps": 8000},
     "medium": {"epochs":  60, "rank": 16, "lr": 1e-4, "resolution": 576,
                "seconds_per_step": 2.2,  "ram_peak_gb": 18,
                "label": "Medium",
                "subtitle": "~60 epochs · rank 16 · 576px",
-               "checkpoint_interval": 500},
+               "checkpoint_interval": 500,
+               "max_steps": 12000},
     # high tier mirrors the validated CLI recipe (rank 32 / 100 epochs /
     # lr 1e-4 / 512px) — at 50 images that's the legacy 5000 steps. The
     # earlier 5e-5 LR was a mistake; 1e-4 is the proven default
@@ -886,7 +985,8 @@ TRAIN_PRESETS = {
                "seconds_per_step": 2.0,  "ram_peak_gb": 28,
                "label": "High",
                "subtitle": "~100 epochs · rank 32 · 512px (validated v2 recipe)",
-               "checkpoint_interval": 250},
+               "checkpoint_interval": 250,
+               "max_steps": 20000},
 }
 
 # Style LoRA presets — parallel to TRAIN_PRESETS but tuned for aesthetic
@@ -908,32 +1008,142 @@ TRAIN_STYLE_PRESETS = {
                "seconds_per_step": 1.5,  "ram_peak_gb": 12,
                "label": "Quick",
                "subtitle": "~30 epochs · rank 16 · 512px",
-               "checkpoint_interval": 500},
+               "checkpoint_interval": 500,
+               "max_steps": 8000},
     "medium": {"epochs":  60, "rank": 32, "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 2.0,  "ram_peak_gb": 18,
                "label": "Medium",
                "subtitle": "~60 epochs · rank 32 · 512px",
-               "checkpoint_interval": 500},
+               "checkpoint_interval": 500,
+               "max_steps": 12000},
     "high":   {"epochs": 100, "rank": 32, "lr": 1e-4, "resolution": 512,
                "seconds_per_step": 2.0,  "ram_peak_gb": 28,
                "label": "High",
                "subtitle": "~100 epochs · rank 32 · 512px",
-               "checkpoint_interval": 250},
+               "checkpoint_interval": 250,
+               "max_steps": 20000},
 }
+
+
+TRAIN_TARGET_MODULES_DEFAULT = ["to_q", "to_k", "to_v", "to_out"]
+TRAIN_TARGET_MODULES_COMPACT = ["to_q", "to_v"]
 
 
 def _preset_steps_for(preset_cfg: dict, image_count: int) -> int:
     """Compute steps for a preset given the dataset size.
 
-    `epochs × image_count` is the contract. Floor of 1 (so a degenerate
-    image_count=0 doesn't yield zero-step training, which would just
-    skip the loop and emit a useless artifact). No upper bound here —
-    if a power user uploads 200 images to a "high" preset and wants
-    20000 steps (~11h), the system honors that. The Train tab's wall-
-    time chip surfaces the cost up-front so it's their informed call.
+    `epochs × image_count` is the baseline. Floor of 1 (so a degenerate
+    image_count=0 doesn't yield zero-step training), then cap by the
+    preset's `max_steps` when present. The cap is deliberately part of the
+    server contract: old browser JS and hand-written API calls must not be
+    able to enqueue a multi-thousand-step run on a memory-constrained Mac
+    by accident.
     """
     epochs = int(preset_cfg.get("epochs", 0))
-    return max(1, epochs * max(1, int(image_count or 0)))
+    steps = max(1, epochs * max(1, int(image_count or 0)))
+    try:
+        max_steps = int(preset_cfg.get("max_steps") or 0)
+    except (TypeError, ValueError):
+        max_steps = 0
+    if max_steps > 0:
+        steps = min(steps, max_steps)
+    return steps
+
+
+def _select_train_profile(total_ram_gb: float, tier_key: str) -> dict:
+    """Mutate Train presets for hardware-sensitive LoRA training.
+
+    Video rendering and LoRA training have different memory shapes. A 48 GB
+    Mac can run the regular Q4/Q8 video modes, but full 512px LTX LoRA
+    training still materializes backward activations for the dev transformer
+    and falls into heavy swap. The compact profile trades capacity for a run
+    that finishes: lower canvas, lower rank, fewer target modules, and capped
+    steps. The clamps are mirrored in make_job so stale forms cannot bypass
+    them.
+    """
+    if 0 < float(total_ram_gb or 0) < 64:
+        compact_modules = list(TRAIN_TARGET_MODULES_COMPACT)
+        TRAIN_PRESETS.update({
+            "quick":  {"epochs": 2,  "rank": 4, "lr": 1e-4, "resolution": 384,
+                       "seconds_per_step": 14.0, "ram_peak_gb": 38,
+                       "label": "Quick",
+                       "subtitle": "~2 epochs · rank 4 · 384px · max 120 steps",
+                       "checkpoint_interval": 100,
+                       "max_steps": 120, "max_rank": 4, "max_resolution": 384,
+                       "target_modules": compact_modules},
+            "medium": {"epochs": 5,  "rank": 8, "lr": 1e-4, "resolution": 384,
+                       "seconds_per_step": 16.0, "ram_peak_gb": 40,
+                       "label": "Medium",
+                       "subtitle": "~5 epochs · rank 8 · 384px · max 300 steps",
+                       "checkpoint_interval": 100,
+                       "max_steps": 300, "max_rank": 8, "max_resolution": 384,
+                       "target_modules": compact_modules},
+            "high":   {"epochs": 10, "rank": 8, "lr": 1e-4, "resolution": 448,
+                       "seconds_per_step": 20.0, "ram_peak_gb": 44,
+                       "label": "High",
+                       "subtitle": "~10 epochs · rank 8 · 448px · max 500 steps",
+                       "checkpoint_interval": 100,
+                       "max_steps": 500, "max_rank": 8, "max_resolution": 448,
+                       "target_modules": compact_modules},
+        })
+        TRAIN_STYLE_PRESETS.update({
+            "quick":  {"epochs": 2,  "rank": 8, "lr": 1e-4, "resolution": 384,
+                       "seconds_per_step": 14.0, "ram_peak_gb": 38,
+                       "label": "Quick",
+                       "subtitle": "~2 epochs · rank 8 · 384px · max 120 steps",
+                       "checkpoint_interval": 100,
+                       "max_steps": 120, "max_rank": 8, "max_resolution": 384,
+                       "target_modules": compact_modules},
+            "medium": {"epochs": 5,  "rank": 8, "lr": 1e-4, "resolution": 384,
+                       "seconds_per_step": 16.0, "ram_peak_gb": 40,
+                       "label": "Medium",
+                       "subtitle": "~5 epochs · rank 8 · 384px · max 300 steps",
+                       "checkpoint_interval": 100,
+                       "max_steps": 300, "max_rank": 8, "max_resolution": 384,
+                       "target_modules": compact_modules},
+            "high":   {"epochs": 10, "rank": 8, "lr": 1e-4, "resolution": 448,
+                       "seconds_per_step": 20.0, "ram_peak_gb": 44,
+                       "label": "High",
+                       "subtitle": "~10 epochs · rank 8 · 448px · max 500 steps",
+                       "checkpoint_interval": 100,
+                       "max_steps": 500, "max_rank": 8, "max_resolution": 448,
+                       "target_modules": compact_modules},
+        })
+        return {
+            "key": "compact_training",
+            "label": "48 GB safe training",
+            "ram_gb": round(float(total_ram_gb or 0), 1),
+            "tier": tier_key,
+            "compact": True,
+            "max_rank": 8,
+            "max_resolution": 448,
+            "max_steps": 500,
+            "target_modules": compact_modules,
+            "note": (
+                "Training uses compact LoRA settings on 48 GB-class Macs to "
+                "avoid MLX swap thrash."
+            ),
+        }
+    return {
+        "key": "full_training",
+        "label": "Full training",
+        "ram_gb": round(float(total_ram_gb or 0), 1),
+        "tier": tier_key,
+        "compact": False,
+        # >=64 GB: these are generous *ceilings*, not a throttle. Memory-
+        # constrained Macs are already protected by the compact profile above;
+        # on big-memory machines the caps only catch runaway/stale values, so
+        # documented power-user runs still work — the 1024x576 widescreen recipe
+        # and long high-step runs (the old "20000 steps honored" behavior).
+        # (Adopting @anubissbe's PR #31 — its full_training caps were 768px /
+        # 7000 steps and applied to every ≥64 GB machine; scoped up here.)
+        "max_rank": 64,
+        "max_resolution": 1024,
+        "max_steps": 20000,
+        "target_modules": list(TRAIN_TARGET_MODULES_DEFAULT),
+    }
+
+
 
 # Train-type values accepted by /train/start and stamped onto job params.
 TRAIN_TYPES = ("character", "style")
@@ -1954,6 +2164,100 @@ def list_characters() -> list[dict]:
                                  if sample else None),
         })
     return out
+
+
+# ---- Shipped sample character ------------------------------------------------
+# So a new user can try Character / Remix WITHOUT training a LoRA first (the #1
+# barrier to trying the feature — nobody wants to spend an hour training before
+# they know it even works). Hosted as a GitHub release asset on the public repo.
+# The SERVER owns the URL — clients only trigger the fetch; this is not a generic
+# downloader. Lands in mlx_models/loras/ where list_characters() discovers it by
+# the <trigger>_v2.safetensors convention (→ shows up as "Bizarro").
+SAMPLE_CHARACTER = {
+    "trigger": "bizarrotrn",
+    "name": "Bizarro (sample)",
+    "filename": "bizarrotrn_v2.safetensors",
+    "url": ("https://github.com/mrbizarro/phosphene/releases/download/"
+            "sample-character-bizarro/bizarrotrn_v2.safetensors"),
+    "sha256": "a52e648a4e3edccd279363acdc85337d1d9813ca5dab30f8948f79393a4ba615",
+    "size_bytes": 855966824,
+}
+
+_sample_char_lock = threading.Lock()
+# status: idle | downloading | done | error
+_sample_char_state: dict = {"status": "idle", "mb": 0,
+                            "total_mb": SAMPLE_CHARACTER["size_bytes"] // (1 << 20),
+                            "error": None}
+
+
+def _set_sample_state(**kw) -> None:
+    """Rebind-free state update (mutate in place under the lock) so no route
+    needs a `global` declaration."""
+    with _sample_char_lock:
+        _sample_char_state.clear()
+        _sample_char_state.update(kw)
+
+
+def _sample_character_present() -> bool:
+    # Existence-only (NOT a size match): if any bizarrotrn_v2.safetensors is on
+    # disk — ours or a user's own — the character already shows in the picker,
+    # and we must never overwrite it.
+    try:
+        return (_safe_loras_dir() / SAMPLE_CHARACTER["filename"]).is_file()
+    except OSError:
+        return False
+
+
+def _download_sample_character_bg() -> None:
+    """Stream the sample character LoRA into mlx_models/loras/ in a daemon
+    thread. Atomic (.partial → rename) + sha256-verified, so a mid-download kill
+    or a corrupt transfer never leaves a file list_characters() would pick up."""
+    import urllib.request
+    import hashlib
+    spec = SAMPLE_CHARACTER
+    total_mb = spec["size_bytes"] // (1 << 20)
+    tmp: Path | None = None
+    try:
+        loras_dir = _safe_loras_dir()
+        loras_dir.mkdir(parents=True, exist_ok=True)
+        target = loras_dir / spec["filename"]
+        if target.is_file():
+            # Never clobber an existing bizarrotrn_v2 (ours from a prior run, or
+            # a user who trained their own with that trigger). It already lists.
+            _set_sample_state(status="done", mb=total_mb, total_mb=total_mb, error=None)
+            return
+        tmp = target.with_suffix(target.suffix + ".partial")
+        push(f"[sample-character] downloading {spec['name']} (~{total_mb} MB)…")
+        req = urllib.request.Request(spec["url"], headers={"User-Agent": "Phosphene"})
+        h = hashlib.sha256()
+        written = 0
+        last_log = 0.0
+        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as fh:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                h.update(chunk)
+                written += len(chunk)
+                now = time.time()
+                if now - last_log > 2.5:
+                    _set_sample_state(status="downloading", mb=written // (1 << 20),
+                                      total_mb=total_mb, error=None)
+                    last_log = now
+        if h.hexdigest() != spec["sha256"]:
+            raise RuntimeError("checksum mismatch (download corrupt) — please retry")
+        tmp.replace(target)
+        _set_sample_state(status="done", mb=total_mb, total_mb=total_mb, error=None)
+        push(f"[sample-character] installed → character '{spec['trigger']}' ({spec['name']})")
+    except Exception as e:  # noqa: BLE001
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        _set_sample_state(status="error", mb=0, total_mb=total_mb, error=str(e)[:200])
+        push(f"[sample-character] FAILED: {e}")
 
 
 def _character_lora_basenames() -> set[str]:
@@ -3832,7 +4136,9 @@ CAPABILITIES: dict[str, dict] = {
         },
     },
     "standard": {
-        # 48–79 GB. 64 GB M-Studio is the canonical hardware here.
+        # 48–79 GB. 64 GB M-Studio is the canonical video-render baseline,
+        # but 48 GB systems still need a separate compact profile for LoRA
+        # training because backward activations are heavier than inference.
         "label": "Comfortable",
         "ram_label": "48–79 GB",
         "tagline": "Every mode works · larger modes capped at 768 px",
@@ -3844,14 +4150,14 @@ CAPABILITIES: dict[str, dict] = {
         "allows_keyframe": True,
         "allows_extend": True,
         "blurb": (
-            "This is the 64 GB tier — the panel was built and tuned on "
-            "exactly this hardware. Every mode works. Text-to-video and "
-            "image-to-video run at the full 1280×704. The two biggest "
-            "modes (first-last-frame interpolation and extending an "
-            "existing clip) cap their video size at 768 pixels on the "
-            "longer side because the bigger model behind them runs out "
-            "of memory above that. 768 is a sweet-spot working size; "
-            "you can run a separate upscaler afterwards if you need 720p+."
+            "This Mac has 48–79 GB of unified memory. Every video mode "
+            "works. Text-to-video and image-to-video run at the full "
+            "1280×704. The two biggest modes (first-last-frame "
+            "interpolation and extending an existing clip) cap their "
+            "video size at 768 pixels on the longer side because the "
+            "bigger model behind them runs out of memory above that. "
+            "48 GB machines use a compact LoRA training profile so "
+            "training does not fall into multi-hour swap thrash."
         ),
         # Times are measured wall clocks for a 5 s render (121 frames @ 24 fps)
         # at Exact speed, on the canonical Comfortable hardware (M-Studio /
@@ -3953,6 +4259,21 @@ CAPABILITIES: dict[str, dict] = {
 }
 
 
+def _detect_total_ram_gb() -> float:
+    """Return physical unified memory in GiB, or 0.0 when unavailable."""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True, text=True, timeout=1,
+        ).stdout.strip()
+        return int(out) / 1024**3
+    except Exception:
+        return 0.0
+
+
+SYSTEM_RAM_GB = _detect_total_ram_gb()
+
+
 def _detect_tier() -> str:
     """Pick a tier based on `hw.memsize`. Cached at module load — RAM is
     fixed at boot. LTX_TIER_OVERRIDE env var lets advanced users force a
@@ -3960,13 +4281,8 @@ def _detect_tier() -> str:
     override = os.environ.get("LTX_TIER_OVERRIDE", "").strip().lower()
     if override in CAPABILITIES:
         return override
-    try:
-        out = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, timeout=1,
-        ).stdout.strip()
-        gb = int(out) / 1024**3
-    except Exception:
+    gb = SYSTEM_RAM_GB
+    if gb <= 0:
         return "standard"   # safe default
     if gb < 48:  return "base"
     if gb < 80:  return "standard"
@@ -3976,6 +4292,116 @@ def _detect_tier() -> str:
 
 SYSTEM_TIER = _detect_tier()
 SYSTEM_CAPS = CAPABILITIES[SYSTEM_TIER]
+TRAIN_PROFILE = _select_train_profile(SYSTEM_RAM_GB, SYSTEM_TIER)
+
+
+def _select_generation_profile(total_ram_gb: float, tier_key: str) -> dict:
+    """Hardware profile for video generation, separate from render tier labels.
+
+    A 48 GB M5 Pro can run the model, but long native 24 fps clips plus large
+    LoRA stacks push unified memory into swap. The regular `standard` tier is
+    still correct for feature availability; this profile only changes how new
+    T2V/I2V jobs are shaped so they do not start in the pathological state the
+    current live render hit.
+    """
+    if 0 < float(total_ram_gb or 0) < 64:
+        return {
+            "key": "m5pro48_generation",
+            "label": "48 GB fast generation",
+            "ram_gb": round(float(total_ram_gb or 0), 1),
+            "tier": tier_key,
+            "compact": True,
+            "max_dim": 1024,
+            "auto_temporal_after_frames": 241,
+            "warn_loras": 6,
+            "note": (
+                "Long Q4 T2V/I2V renders use 12->24 fps generation on "
+                "48 GB-class Macs to avoid MLX swap thrash."
+            ),
+        }
+    return {
+        "key": "full_generation",
+        "label": "Full generation",
+        "ram_gb": round(float(total_ram_gb or 0), 1),
+        "tier": tier_key,
+        "compact": False,
+        "max_dim": 0,
+        "auto_temporal_after_frames": 0,
+        "warn_loras": 0,
+    }
+
+
+GENERATION_PROFILE = _select_generation_profile(SYSTEM_RAM_GB, SYSTEM_TIER)
+
+
+def _scale_dims_to_max(width: int, height: int, max_dim: int,
+                       *, align: int = 32) -> tuple[int, int]:
+    """Scale dimensions down to max_dim while preserving aspect and alignment."""
+    if max_dim <= 0 or max(width, height) <= max_dim:
+        return width, height
+    scale = max_dim / float(max(width, height))
+    new_w = max(align, int(round((width * scale) / align)) * align)
+    new_h = max(align, int(round((height * scale) / align)) * align)
+    return new_w, new_h
+
+
+def _apply_generation_profile_to_job(job: dict) -> None:
+    """Clamp new video jobs for the active generation profile.
+
+    This is intentionally server-side. The browser may be stale, Load Params
+    can replay older sidecars, and external callers can post directly to
+    /queue/add. Any of those paths must still avoid a 48 GB machine accepting
+    a long native 24 fps render that immediately falls into swap.
+    """
+    profile = GENERATION_PROFILE
+    params = job.get("params") or {}
+    params["generation_profile"] = profile.get("key")
+    params["generation_profile_label"] = profile.get("label")
+    if not profile.get("compact"):
+        return
+    mode = (params.get("mode") or "").lower()
+    quality = (params.get("quality") or "balanced").lower()
+    if mode not in ("t2v", "i2v", "i2v_clean_audio", "a2v"):
+        return
+    notes: list[str] = list(params.get("generation_clamp_notes") or [])
+    new_notes: list[str] = []
+    try:
+        width = int(params.get("width") or 0)
+        height = int(params.get("height") or 0)
+        frames = int(params.get("frames") or 0)
+    except (TypeError, ValueError):
+        return
+
+    # Q4 one-stage jobs are the common fast path and support Long Clip Boost.
+    # Q8 High has a different sampler and does not support the 12->24 fps path,
+    # so leave High alone rather than silently changing requested quality.
+    if quality != "high":
+        max_dim = int(profile.get("max_dim") or 0)
+        new_w, new_h = _scale_dims_to_max(width, height, max_dim)
+        if (new_w, new_h) != (width, height):
+            params["width"], params["height"] = new_w, new_h
+            new_notes.append(f"resolution {width}x{height} -> {new_w}x{new_h}")
+
+        auto_after = int(profile.get("auto_temporal_after_frames") or 0)
+        if (mode in ("t2v", "i2v") and auto_after and frames > auto_after
+                and (params.get("temporal_mode") or "native") == "native"):
+            params["temporal_mode"] = "fps12_interp24"
+            approx = round(_frames_to_model_duration(frames, FPS), 1)
+            new_notes.append(
+                f"Long Clip Boost auto-enabled for {frames}f (~{approx}s)"
+            )
+
+    warn_loras = int(profile.get("warn_loras") or 0)
+    lora_count = len(params.get("loras") or [])
+    if warn_loras and lora_count > warn_loras:
+        new_notes.append(
+            f"{lora_count} LoRAs selected; large stacks are slower on 48 GB"
+        )
+    for note in new_notes:
+        if note not in notes:
+            notes.append(note)
+    if notes:
+        params["generation_clamp_notes"] = notes
 
 
 def tier_max_dim(kind: str) -> int:
@@ -4190,6 +4616,139 @@ def _ensure_downscaled(src: Path, max_dim: int = 768, align: int = 32) -> Path:
             pass
         raise
     return cached
+
+
+# ============================================================================
+# Ingredients (multi-reference) — sheet compositing + conditioning clip
+# ============================================================================
+# The Ingredients IC-LoRA conditions on a single "reference sheet" image: the
+# 2-8 subject images tiled into one frame. That sheet, repeated to N frames, is
+# the IC `video_conditioning`. Both helpers below are faithful ports of the
+# public Space ltx-community/ltx-2.3-ingredients-distilled (compose_sheet /
+# _fit_contain / _sheet_to_video) — the SAME 1536x896 canvas, ceil(sqrt(N))
+# grid, 16px gutter, aspect-preserving contain-pad (nothing cropped). The only
+# deviation: we loop the sheet PNG into the clip with ffmpeg (the panel's
+# resolver) instead of imageio, which isn't in the venv.
+
+def _fit_contain_cell(im, cw: int, ch: int, bg=(0, 0, 0)):
+    """Scale `im` to fit fully inside (cw, ch) keeping aspect, center on a
+    padded cell. Unlike a cover-crop, nothing is cropped off. Port of the
+    Space's `_fit_contain`."""
+    from PIL import Image, ImageOps
+    fitted = ImageOps.contain(im, (cw, ch), Image.LANCZOS)
+    cell = Image.new("RGB", (cw, ch), bg)
+    cell.paste(fitted, ((cw - fitted.width) // 2, (ch - fitted.height) // 2))
+    return cell
+
+
+def _compose_ingredient_sheet(image_paths: list[str], out_path: Path) -> Path:
+    """Tile 2-8 reference images into ONE sheet PNG at `out_path`.
+
+    Faithful port of the Space's `compose_sheet`: 1536x896 black canvas,
+    cols = ceil(sqrt(N)), rows = ceil(N/cols), 16px gutter, each cell
+    aspect-preserved + centered (no crop). A single image is written through
+    unchanged (resized only by the conditioning step). Returns `out_path`."""
+    import math
+    from PIL import Image
+    paths = [p for p in (image_paths or []) if p and Path(p).exists()]
+    if not paths:
+        raise RuntimeError(
+            "Ingredients needs at least one reference image. Upload 2-8 "
+            "subjects (a face + a prop + a location) in the Ingredients picker."
+        )
+    imgs = [Image.open(p).convert("RGB") for p in paths]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(imgs) == 1:
+        imgs[0].save(out_path, format="PNG")
+        return out_path
+    BG = (0, 0, 0)
+    CW, CH = 1536, 896
+    canvas = Image.new("RGB", (CW, CH), BG)
+    cols = math.ceil(math.sqrt(len(imgs)))
+    rows = math.ceil(len(imgs) / cols)
+    g = 16
+    cw = (CW - g * (cols + 1)) // cols
+    ch = (CH - g * (rows + 1)) // rows
+    for i, im in enumerate(imgs):
+        r, c = divmod(i, cols)
+        canvas.paste(_fit_contain_cell(im, cw, ch, BG),
+                     (g + c * (cw + g), g + r * (ch + g)))
+    canvas.save(out_path, format="PNG")
+    return canvas if False else out_path
+
+
+def _sheet_to_conditioning_clip(sheet_png: Path, width: int, height: int,
+                                num_frames: int, out_path: Path) -> Path:
+    """Resize the sheet PNG to (width, height) and loop it into an N-frame
+    lossless mp4 at `out_path` — the IC `video_conditioning` the Ingredients
+    LoRA reads. Port of the Space's `_sheet_to_video` (sheet repeated to
+    num_frames), written via ffmpeg instead of imageio.
+
+    yuv444p + crf 0 matches the panel's lossless reference codec so the
+    conditioning frames aren't chroma-subsampled. Atomic .partial rename."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    partial = out_path.with_suffix(out_path.suffix + ".partial")
+    # `-loop 1 -framerate FPS -i sheet.png -frames:v N` emits exactly N
+    # identical frames. `-f mp4` is mandatory because of the .partial suffix
+    # (same ffmpeg autodetect gotcha as _ensure_downscaled).
+    cmd = [str(FFMPEG), "-y",
+           "-loop", "1", "-framerate", str(int(FPS)), "-i", str(sheet_png),
+           "-t", f"{max(1, num_frames) / float(FPS):.4f}",
+           "-frames:v", str(max(1, int(num_frames))),
+           "-vf", f"scale={int(width)}:{int(height)}",
+           "-c:v", "libx264", "-pix_fmt", "yuv444p", "-crf", "0",
+           "-preset", "veryfast",
+           "-f", "mp4",
+           str(partial)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=180)
+        os.replace(partial, out_path)
+    except Exception:
+        try:
+            partial.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return out_path
+
+
+def _ensure_ingredients_lora() -> str:
+    """Return a local path to the Ingredients IC-LoRA .safetensors.
+
+    Resolution order:
+      1. The installer-fetched local file (CURATED_LORAS["ingredients"]
+         .local_path) — the fast path on a complete install.
+      2. A TARGETED single-file fetch of just the ingredients weight from the
+         un-gated mirror (DeepBeepMeep/LTX-2 → repo_file) via hf_hub_download,
+         copied into mlx_models/loras/ic/. This is the self-heal path when the
+         install/update best-effort fetch didn't land.
+
+    Critically, this NEVER hands the bare mirror repo_id to the helper's
+    _resolve_lora_path, because DeepBeepMeep/LTX-2 is a ~708 GB mega-repo and a
+    snapshot_download of it (largest-file pick) would try to pull everything.
+    Returns a filesystem path the helper can fuse directly."""
+    meta = CURATED_LORAS["ingredients"]
+    local = meta.get("local_path") or ""
+    if local and Path(local).exists() and Path(local).stat().st_size > 1024:
+        return local
+    repo_id = meta["repo_id"]
+    repo_file = meta["repo_file"]
+    dest_dir = LORAS_DIR / "ic"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / repo_file
+    if dest.exists() and dest.stat().st_size > 1024:
+        return str(dest)
+    push(f"Ingredients IC-LoRA not on disk — fetching just {repo_file} "
+         f"(~1.3 GB) from {repo_id} (un-gated)…")
+    from huggingface_hub import hf_hub_download
+    # Pull ONLY this one file. local_dir places it directly under ic/ so it
+    # matches local_path on the next run (no symlink-into-cache surprise).
+    got = hf_hub_download(
+        repo_id=repo_id,
+        filename=repo_file,
+        local_dir=str(dest_dir),
+    )
+    return str(got)
 
 
 def list_uploads(limit: int = 40) -> list[dict]:
@@ -5177,25 +5736,16 @@ def _new_job_id() -> str:
 
 
 def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> str | None:
-    """Defense-in-depth: when a character_id is set, the job must route
-    through the Q8 HQ pipeline (quality=high). Q4 distilled inference
-    fuses dev-trained character LoRAs into the wrong base (mismatched
-    sigma schedule) and produces a generic-everyone-looks-vaguely-like
-    -them result — confirmed empirically 2026-05-17 with the chartest
-    Q4-Balanced runs.
+    """Character mode is available on Q4 — LoRAs fuse into the distilled
+    base (identity match is mediocre per 2026-05-17 empirical test with
+    the chartest Q4-Balanced runs, but the render completes). When Q8 is
+    installed and the user picks quality=high, the Q8 HQ pipeline is used
+    and yields faithful identity.
 
-    The UI already prevents the bad combination by swapping the quality
-    strip to Q8-only when a character chip is selected, but a stale
-    form payload, a scripted /queue/batch caller, or a future tab that
-    forgets the chip-swap logic could submit the broken combo. Returning
-    an error keeps the trainer-base contract honest at the API boundary.
-
-    Also catches the loras=[] back-door: a scripted POST with a raw
-    train_character-kind LoRA in the `loras` JSON array (no character_id)
-    + quality=balanced would otherwise bypass this check — the UI's
-    updateQualityChipsForLora handles it client-side but the server
-    must enforce the same rule.
-
+    This function still catches the loras=[] back-door: a scripted POST
+    with a raw train_character-kind LoRA in the `loras` JSON array (no
+    character_id) + a non-high quality asserts a character LoRA against
+    the Q4 base, which produces the same mediocre-identity result.
     Returns None when valid, or an error string to surface as a 400."""
     def _f(name: str, default: str = "") -> str:
         v = form.get(name, default)
@@ -5205,21 +5755,15 @@ def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> 
     quality = _f("quality", "balanced").lower()
     cid = _f("character_id", "")
     if cid:
-        if quality != "high":
-            return (
-                f"character {cid!r} requires quality=high (Q8 HQ pipeline). "
-                f"Got quality={quality!r}. Character LoRAs are trained against "
-                f"the Q8 dev transformer's sigma schedule; the Q4 distilled "
-                f"pipeline fuses them into the wrong base and produces "
-                f"identity-mushed output. Pick Q8 Pro or Q8 Draft in the "
-                f"Character quality strip."
-            )
+        # Character mode on Q4 submits with Quick/Balanced/Standard.
+        # The identity match is imperfect but it renders and does not
+        # error. Q8 users who pick quality=high get the full fidelity
+        # path — no enforcement needed.
         return None
     # No character_id — but a raw train_character LoRA in `loras` triggers
-    # the same incompatibility. Resolve each entry's sidecar and refuse if
-    # any one of them is kind == "train_character" and quality != high.
-    if quality == "high":
-        return None  # the only outcome that needs to fail is non-high here
+    # the same quality concern. 2026-06-26: we allow it on Q4 (same
+    # mediocre-identity trade-off the user accepted by enabling character
+    # mode). Log a note but do not block.
     try:
         loras = parse_loras_from_form(form)
     except Exception:
@@ -5233,13 +5777,8 @@ def _validate_character_quality(form: dict[str, list[str]] | dict[str, str]) -> 
         except Exception:
             continue
         if (meta.get("kind") or "") == "train_character":
-            return (
-                f"a character LoRA ({p.name!r}) requires quality=high "
-                f"(Q8 HQ pipeline). Got quality={quality!r}. Character LoRAs "
-                f"are trained against the Q8 dev transformer's sigma schedule; "
-                f"the Q4 distilled pipeline fuses them into the wrong base "
-                f"and produces identity-mushed output. Pick Q8 Pro or Q8 Draft."
-            )
+            log_push(f"[character] raw train_character LoRA {p.name!r} at quality={quality!r} "
+                     f"on Q4 base — identity match may be imperfect")
     return None
 
 
@@ -5313,6 +5852,52 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         resolution = _int_or("resolution", cfg["resolution"])
         train_width = _int_or("width", 0) or resolution
         train_height = _int_or("height", 0) or resolution
+        clamp_notes: list[str] = []
+        # Hardware training profile clamps. These are server-side on purpose:
+        # a stale browser tab can still post the old 512px/rank-32/10000-step
+        # advanced values. Without this guard a 48 GB Mac accepts the request,
+        # then spends hours in MLX/Metal swap thrash.
+        try:
+            max_rank = int(cfg.get("max_rank") or TRAIN_PROFILE.get("max_rank") or 0)
+        except (TypeError, ValueError):
+            max_rank = 0
+        if max_rank > 0 and rank > max_rank:
+            clamp_notes.append(f"rank {rank} -> {max_rank}")
+            rank = max_rank
+        try:
+            max_steps = int(cfg.get("max_steps") or TRAIN_PROFILE.get("max_steps") or 0)
+        except (TypeError, ValueError):
+            max_steps = 0
+        if max_steps > 0 and steps > max_steps:
+            clamp_notes.append(f"steps {steps} -> {max_steps}")
+            steps = max_steps
+        try:
+            max_resolution = int(cfg.get("max_resolution") or
+                                 TRAIN_PROFILE.get("max_resolution") or 0)
+        except (TypeError, ValueError):
+            max_resolution = 0
+        if max_resolution > 0 and max(train_width, train_height, resolution) > max_resolution:
+            old_dims = (train_width, train_height)
+            if train_width == train_height:
+                train_width = train_height = max_resolution
+            else:
+                scale = max_resolution / float(max(train_width, train_height))
+                align = 32
+                train_width = max(align, int(round((train_width * scale) / align)) * align)
+                train_height = max(align, int(round((train_height * scale) / align)) * align)
+            resolution = min(resolution, max_resolution)
+            clamp_notes.append(
+                f"resolution {old_dims[0]}x{old_dims[1]} -> {train_width}x{train_height}"
+            )
+        raw_modules = cfg.get("target_modules") or TRAIN_PROFILE.get("target_modules")
+        allowed_modules = set(TRAIN_TARGET_MODULES_DEFAULT)
+        if isinstance(raw_modules, str):
+            target_modules = [x.strip() for x in raw_modules.split(",") if x.strip()]
+        else:
+            target_modules = list(raw_modules or TRAIN_TARGET_MODULES_DEFAULT)
+        target_modules = [m for m in target_modules if m in allowed_modules]
+        if not target_modules:
+            target_modules = list(TRAIN_TARGET_MODULES_DEFAULT)
         caption_strategy = (f("caption_strategy", "trigger_simple")
                             or "trigger_simple").lower()
         # Crop strategy for the training preprocess.
@@ -5373,11 +5958,16 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                 "preset": preset,
                 "trigger": trigger,
                 "rank": rank,
+                "alpha": rank,
                 "steps": steps,
                 "lr": lr,
                 "resolution": resolution,
                 "width": train_width,
                 "height": train_height,
+                "target_modules": target_modules,
+                "train_profile": TRAIN_PROFILE.get("key"),
+                "train_profile_label": TRAIN_PROFILE.get("label"),
+                "train_clamp_notes": clamp_notes,
                 "caption_strategy": caption_strategy,
                 "crop_strategy": crop_strategy,
                 "image_count": image_count,
@@ -5558,6 +6148,32 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             "audio": f("audio", str(AUDIO_DEFAULT)),
             # extend mode params
             "video_path": f("video_path", ""),
+            # restore (Colorize) mode — the B&W source clip to colorize. MUST
+            # be in this allowlist or the path silently no-ops on /queue/add
+            # (the known make_job allowlist trap — see CLAUDE.md).
+            "restore_video_path": f("restore_video_path", ""),
+            # ingredients (multi-reference) mode — JSON list of 2-8 uploaded
+            # image paths + the action description. SAME allowlist trap: both
+            # MUST be here or they silently no-op on /queue/add (the panel UI
+            # posts there). `prompt` above carries the SHEET description.
+            "ingredient_images_json": f("ingredient_images_json", ""),
+            "ingredient_action": f("ingredient_action", ""),
+            # Ingredients × Character — OPTIONAL trained character LoRA stacked
+            # ON TOP of the Ingredients IC-LoRA so the SAME trained face lands in
+            # every composed scene (identity from the LoRA, not a face photo).
+            # The differentiating feature — see the ingredients dispatch where
+            # these get fused into `ingredients_loras` at char strength while
+            # ref-strength stays 0.0. SAME allowlist trap: must be here or they
+            # silently no-op on /queue/add. Empty `ingredient_char_lora` = the
+            # plain (no-character) path, byte-identical to before.
+            "ingredient_char_lora": f("ingredient_char_lora", ""),
+            "ingredient_char_strength": f("ingredient_char_strength", "1.3"),
+            "ingredient_char_trigger": f("ingredient_char_trigger", ""),
+            # control (Union) mode — the RAW-RGB control clip whose
+            # motion/structure/composition drives the render. SAME allowlist
+            # trap: this MUST be here or it silently no-ops on /queue/add (the
+            # panel UI posts there). `prompt` carries the new subject/scene.
+            "control_video_path": f("control_video_path", ""),
             "extend_frames": max(1, int(f("extend_frames", "5") or 5)),
             "extend_direction": f("extend_direction", "after"),
             "extend_steps": max(1, int(f("extend_steps", "8") or 8)),
@@ -5635,12 +6251,31 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # 48-79 GB tier to dodge boundary OOM). User can override
             # explicitly to "full" or "off" via this form field.
             "stage2_image_conditioning": f("stage2_image_conditioning", "") or "",
+            "audio_conditioning_scale": float(f("audio_conditioning_scale", "1.0") or 1.0),
         },
         "command": None,
         "raw_path": None,
         "output_path": None,
         "error": None,
     }
+    # STG (Spatio-Temporal Guidance) — "detail guidance" slider. Only stamp
+    # `stg_scale` onto params when the form actually sent a value, so each
+    # dispatch keeps its OWN default when the user didn't touch the slider:
+    #   - generate_hq reads p.get("stg_scale", 0.0)  → HQ STG off by default
+    #   - generate_a2v reads p.get("stg_scale", 1.0) → A2V STG on by default
+    # Forcing a key here would clobber the A2V default to 0.0 and silently
+    # turn A2V STG off — hence the conditional. STG only acts on the Q8 CFG
+    # pipelines (HQ / A2V); the Q4 distilled paths (Quick/Standard/Balanced)
+    # run X0Model with no guider and ignore it entirely. Clamp to the guider's
+    # sane band 0.0–4.0. This key MUST be set on params or it silently no-ops
+    # on /queue/add (the known allowlist trap), which is exactly why the panel
+    # JS only sends it on quality=high and we mirror that intent here.
+    _stg_raw = f("stg_scale", "")
+    if _stg_raw != "":
+        try:
+            job["params"]["stg_scale"] = max(0.0, min(4.0, float(_stg_raw)))
+        except (TypeError, ValueError):
+            pass
     # Attach Characters-origin metadata only when the form actually carried
     # it. Keeps the params shape unchanged for every other entry point.
     if _source == "characters" and _character_id:
@@ -5721,6 +6356,8 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # Persist the strength too so Load Params can restore the
             # exact slider value (defaults to 1.0 on the picker).
             job["params"].setdefault("character_strength", char_strength)
+
+    _apply_generation_profile_to_job(job)
 
     lora_artifact_neg = _lora_artifact_negative_prompt(job["params"].get("loras") or [])
     if lora_artifact_neg:
@@ -6202,6 +6839,16 @@ def run_train_job_inner(job: dict) -> None:
     trigger = p.get("trigger") or _suggest_trigger_token()
     caption_strategy = p.get("caption_strategy", "trigger_simple")
     preset_table = TRAIN_STYLE_PRESETS if is_style else TRAIN_PRESETS
+    clamp_notes = p.get("train_clamp_notes") or []
+    profile_label = p.get("train_profile_label") or TRAIN_PROFILE.get("label")
+    if profile_label:
+        push(f"[train] profile: {profile_label}")
+    if clamp_notes:
+        push("[train] hardware clamps applied: " + "; ".join(map(str, clamp_notes)))
+    target_modules = p.get("target_modules") or preset_table.get(preset, {}).get("target_modules")
+    if not target_modules:
+        target_modules = list(TRAIN_TARGET_MODULES_DEFAULT)
+    push("[train] LoRA target modules: " + ", ".join(map(str, target_modules)))
 
     # ---- Captions -------------------------------------------------------
     # Two paths into this block:
@@ -6314,8 +6961,12 @@ def run_train_job_inner(job: dict) -> None:
         "trigger": trigger,
         "preset": preset,
         "rank": p.get("rank"),
+        "alpha": p.get("alpha") or p.get("rank"),
         "steps": p.get("steps"),
         "lr": p.get("lr"),
+        "target_modules": target_modules,
+        "train_profile": p.get("train_profile"),
+        "train_profile_label": profile_label,
         # `resolution` is the legacy v2 field — keep it for back-compat
         # (some external tools still read it). For widescreen training
         # we just write the width into this slot; consumers reading
@@ -6770,10 +7421,13 @@ def run_job_inner(job: dict) -> None:
         return run_image_job_inner(job)
     if mode == "train":
         return run_train_job_inner(job)
+    _apply_generation_profile_to_job(job)
+    for note in p.get("generation_clamp_notes") or []:
+        push(f"[generation] {p.get('generation_profile_label')}: {note}")
     quality = p.get("quality", "standard")
     if p.get("accel") not in ("off", "boost", "turbo"):
         p["accel"] = "off"
-    if quality == "high" or mode in ("extend", "keyframe", "a2v"):
+    if quality == "high" or mode in ("extend", "keyframe", "a2v", "restore", "ingredients", "control"):
         p["accel"] = "off"
 
     # Guard: Q4 distilled hardcoded 9-sigma schedule needs the full walk to
@@ -6784,7 +7438,7 @@ def run_job_inner(job: dict) -> None:
     #   - extend / keyframe use stage1_steps + stage2_steps via two-stage path
     #   - high quality uses two-stage HQ with its own schedule
     #   - a2v uses A2VidPipelineTwoStage's stage1/stage2 walks
-    if mode not in ("extend", "keyframe", "a2v") and quality != "high" and int(p.get("steps", 8)) < 8:
+    if mode not in ("extend", "keyframe", "a2v", "restore", "ingredients", "control") and quality != "high" and int(p.get("steps", 8)) < 8:
         raise RuntimeError(
             f"steps={p.get('steps')} is below the 8-step minimum for the Q4 distilled "
             "schedule. Fewer steps truncates the sigma walk and leaves >70% noise in "
@@ -6904,6 +7558,469 @@ def run_job_inner(job: dict) -> None:
         write_sidecar(final_out.with_suffix(final_out.suffix + ".json"), sidecar)
         job["output_path"] = str(final_out)
         push(f"Extend done in {sidecar['elapsed_sec']}s → {final_out.name}")
+        if p.get("open_when_done"):
+            subprocess.run(["open", str(final_out)], check=False)
+        return
+
+    if mode == "control":
+        # Control (Union) — drive a render's motion / structure / composition
+        # from a control video, via the OFFICIAL un-gated Union-Control IC-LoRA.
+        # Structurally IDENTICAL to the Colorize (restore) branch — validate a
+        # source clip, force the Q4 distilled folder (the LoRA was trained
+        # against Q4 distilled), inject the curated union-control LoRA, ride the
+        # control clip on the IC reference channel, dispatch via
+        # HELPER.run(generate_restore) (two-stage). The ONE deliberate
+        # difference vs Ingredients: the reference STRENGTH is a FOLLOW value
+        # (~1.0), NOT the 0.0 Ingredients uses. Control WANTS to follow the
+        # driving structure (recon A/B proved raw RGB @1.0 transfers
+        # composition); Ingredients wants to RECOMPOSE away from its sheet.
+        # Default off — no other mode changes.
+        src = p.get("control_video_path") or ""
+        if not src or not Path(src).exists():
+            raise RuntimeError(
+                f"control video not found: {src!r}. Pick a clip in the Control "
+                "video picker (or paste a path) whose motion/structure should "
+                "drive the render."
+            )
+        # Resolution clamp — same shape as Colorize/Extend. Control runs the
+        # distilled two-stage walk; keep the source within the tier's max side
+        # so the VAE encode + denoise fits memory. Cached by target dims.
+        original_src = Path(src)
+        res_max = tier_max_dim("i2v")
+        if res_max:
+            downscaled_src = _ensure_downscaled(original_src, max_dim=res_max)
+            if downscaled_src != original_src:
+                push(f"Control: control clip {original_src.name} downscaled to "
+                     f"{downscaled_src.name} (≤{res_max} max-side, "
+                     f"{SYSTEM_CAPS['label']} tier).")
+                src = str(downscaled_src)
+        # Match the output canvas to the (possibly downscaled) control clip so
+        # the IC reference and the generated frames line up. The Union weight
+        # carries reference_downscale_factor=2 — the IC encoder halves the
+        # reference internally (iclora_utils), so we feed the FULL output dims
+        # here (the encoder does the /2), exactly as Colorize does. Same
+        # ffprobe wrapper the rest of the panel uses (returns (0,0) on failure
+        # → fall back to the form's width/height). Runs BEFORE the shared
+        # width/height/frames locals further down, so read straight off `p`.
+        req_w = int(p.get("width") or 0)
+        req_h = int(p.get("height") or 0)
+        req_frames = int(p.get("frames") or 0) or 49
+        sw, sh = _probe_video_dims(src)
+        # LTX requires width/height multiples of 32 and frames % 8 == 1.
+        ctl_w = max(32, (int(sw) // 32) * 32) if sw else max(32, req_w)
+        ctl_h = max(32, (int(sh) // 32) * 32) if sh else max(32, req_h)
+        ctl_frames = req_frames
+        if ctl_frames % 8 != 1:
+            ctl_frames = max(9, ctl_frames - (ctl_frames % 8) + 1)
+        ctl_meta = CURATED_LORAS["union-control"]
+        strength = float(ctl_meta["default_strength"])
+        # Prefer the local file the installer fetched; fall back to repo_id so
+        # the helper's _resolve_lora_path can snapshot_download it on first use.
+        # (Unlike Ingredients, the Union repo is a clean single-file un-gated
+        # repo — no mega-repo workaround needed, so the repo_id fallback is safe.)
+        control_lora_path = ctl_meta.get("local_path") or ""
+        if not (control_lora_path and Path(control_lora_path).exists()):
+            control_lora_path = ctl_meta["repo_id"]
+        control_loras = list(p.get("loras") or []) + [{
+            "path": control_lora_path,
+            "strength": strength,
+        }]
+        # IC reference STRENGTH — the FOLLOW lever (second element of each
+        # video_conditioning tuple). VideoConditionByReferenceLatent holds the
+        # reference latent with mask_value = 1.0 - strength: 1.0 = control clip
+        # pinned pristine (render FOLLOWS its structure), 0.0 = fully denoisable
+        # (Ingredients' recompose). Recon proved raw RGB @1.0 drives the
+        # composition. Default 1.0; tunable via LTX_CONTROL_REF_STRENGTH for a
+        # looser "inspired-by" follow; clamped to [0.0, 1.0].
+        try:
+            ctl_ref_strength = float(
+                os.environ.get("LTX_CONTROL_REF_STRENGTH", "1.0"))
+        except (TypeError, ValueError):
+            ctl_ref_strength = 1.0
+        ctl_ref_strength = max(0.0, min(1.0, ctl_ref_strength))
+        out_name = original_src.stem + f"_control_{stamp}.mp4"
+        final_out = OUTPUT / out_name
+        job["raw_path"] = str(final_out)
+        # Force the Q4 distilled folder — same rule HDR / Colorize / Ingredients
+        # use. The Union-Control IC-LoRA was trained against the distilled
+        # checkpoint.
+        control_model_dir = (str(MODELS_DIR / "ltx-2.3-mlx-q4")
+                             if (MODELS_DIR / "ltx-2.3-mlx-q4").is_dir()
+                             else str(MODELS_DIR))
+        job_spec = {
+            "action": "generate_restore",
+            "id": job["id"],
+            "params": {
+                "model_dir": control_model_dir,
+                "prompt": p["prompt"],
+                "negative_prompt": p.get("negative_prompt", ""),
+                "output_path": str(final_out),
+                "height": ctl_h,
+                "width": ctl_w,
+                "frames": ctl_frames,
+                "frame_rate": float(FPS),
+                "seed": p["seed"],
+                # The control clip rides the IC reference channel at FOLLOW
+                # strength (~1.0) so the render inherits its structure/motion.
+                "video_conditioning": [[src, ctl_ref_strength]],
+                "loras": control_loras,
+                # Two-stage distilled walk (same as Colorize; NOT single-stage
+                # like Ingredients).
+                "stage1_steps": int(p.get("stage1_steps", 8)),
+                "stage2_steps": int(p.get("stage2_steps", 3)),
+            },
+        }
+        push(f"Control via helper: id={job['id']} ctl={original_src.name} "
+             f"{ctl_w}x{ctl_h} {ctl_frames}f (Q4 distilled + Union-Control "
+             f"IC-LoRA, LoRA strength {strength}, "
+             f"ref/follow strength {ctl_ref_strength})")
+        result = HELPER.run(job_spec)
+        if "seed_used" in result:
+            push(f"seed used: {result['seed_used']}")
+            p["seed_used"] = result["seed_used"]
+        sidecar = {
+            "output": str(final_out), "raw_output": str(final_out),
+            "params": {**p, "command": "control"},
+            "started": job.get("started_at"),
+            "elapsed_sec": round(time.time() - job["started_ts"], 2) if job.get("started_ts") else None,
+            "fps": FPS, "model": control_model_dir, "queue_id": job["id"],
+            "helper_elapsed_sec": result.get("elapsed_sec"),
+            "output_codec": output_codec_settings(),
+        }
+        write_sidecar(final_out.with_suffix(final_out.suffix + ".json"), sidecar)
+        job["output_path"] = str(final_out)
+        push(f"Control done in {sidecar['elapsed_sec']}s → {final_out.name}")
+        if p.get("open_when_done"):
+            subprocess.run(["open", str(final_out)], check=False)
+        return
+
+    if mode == "restore":
+        # Restore (Colorize) — B&W / desaturated source clip → colorized clip,
+        # via the community Colorize IC-LoRA. Modeled on the EXTEND branch:
+        # validate a source video, force the Q4 distilled folder (the LoRA was
+        # trained against Q4 distilled, NOT Q8), inject the curated colorize
+        # LoRA, ride the source on the IC reference channel, dispatch via
+        # HELPER.run(generate_restore). Default off — no other mode changes.
+        src = p.get("restore_video_path") or ""
+        if not src or not Path(src).exists():
+            raise RuntimeError(
+                f"source video for Colorize not found: {src!r}. Pick a B&W clip "
+                "in the Colorize source picker (or paste a path)."
+            )
+        # Resolution clamp — same shape as Extend. Restore runs the distilled
+        # two-stage walk; keep the source within the tier's max side so the
+        # VAE encode + denoise fits memory. Cached by target dims.
+        original_src = Path(src)
+        res_max = tier_max_dim("i2v")
+        if res_max:
+            downscaled_src = _ensure_downscaled(original_src, max_dim=res_max)
+            if downscaled_src != original_src:
+                push(f"Colorize: source {original_src.name} downscaled to "
+                     f"{downscaled_src.name} (≤{res_max} max-side, "
+                     f"{SYSTEM_CAPS['label']} tier).")
+                src = str(downscaled_src)
+        # Match the output canvas to the (possibly downscaled) source so the
+        # IC reference and the generated frames line up. _probe_video_dims is
+        # the same ffprobe wrapper the rest of the panel uses (returns (0,0)
+        # on failure → fall back to the form's width/height). This branch runs
+        # BEFORE the shared width/height/frames locals are computed further
+        # down run_job_inner, so read straight off `p`.
+        req_w = int(p.get("width") or 0)
+        req_h = int(p.get("height") or 0)
+        req_frames = int(p.get("frames") or 0) or 49
+        sw, sh = _probe_video_dims(src)
+        # LTX requires width/height multiples of 32 and frames % 8 == 1.
+        col_w = max(32, (int(sw) // 32) * 32) if sw else max(32, req_w)
+        col_h = max(32, (int(sh) // 32) * 32) if sh else max(32, req_h)
+        col_frames = req_frames
+        if col_frames % 8 != 1:
+            col_frames = max(9, col_frames - (col_frames % 8) + 1)
+        strength = float(CURATED_LORAS["colorize"]["default_strength"])
+        # Prefer the local file the installer fetched; fall back to repo_id so
+        # the helper's _resolve_lora_path can snapshot_download it on first use.
+        colorize_lora_path = CURATED_LORAS["colorize"].get("local_path") or ""
+        if not (colorize_lora_path and Path(colorize_lora_path).exists()):
+            colorize_lora_path = CURATED_LORAS["colorize"]["repo_id"]
+        restore_loras = list(p.get("loras") or []) + [{
+            "path": colorize_lora_path,
+            "strength": strength,
+        }]
+        out_name = original_src.stem + f"_colorized_{stamp}.mp4"
+        final_out = OUTPUT / out_name
+        job["raw_path"] = str(final_out)
+        # Force the Q4 distilled folder — same rule HDR uses. The Colorize
+        # IC-LoRA was trained against transformer-distilled.safetensors.
+        restore_model_dir = (str(MODELS_DIR / "ltx-2.3-mlx-q4")
+                             if (MODELS_DIR / "ltx-2.3-mlx-q4").is_dir()
+                             else str(MODELS_DIR))
+        job_spec = {
+            "action": "generate_restore",
+            "id": job["id"],
+            "params": {
+                "model_dir": restore_model_dir,
+                "prompt": p["prompt"],
+                "negative_prompt": p.get("negative_prompt", ""),
+                "output_path": str(final_out),
+                "height": col_h,
+                "width": col_w,
+                "frames": col_frames,
+                "frame_rate": float(FPS),
+                "seed": p["seed"],
+                # The source clip rides the IC reference channel.
+                "video_conditioning": [[src, strength]],
+                "loras": restore_loras,
+                # Distilled two-stage defaults (same as the HDR IC path).
+                "stage1_steps": int(p.get("stage1_steps", 8)),
+                "stage2_steps": int(p.get("stage2_steps", 3)),
+            },
+        }
+        push(f"Colorize via helper: id={job['id']} src={original_src.name} "
+             f"{col_w}x{col_h} {col_frames}f (Q4 distilled + Colorize IC-LoRA)")
+        result = HELPER.run(job_spec)
+        if "seed_used" in result:
+            push(f"seed used: {result['seed_used']}")
+            p["seed_used"] = result["seed_used"]
+        sidecar = {
+            "output": str(final_out), "raw_output": str(final_out),
+            "params": {**p, "command": "restore"},
+            "started": job.get("started_at"),
+            "elapsed_sec": round(time.time() - job["started_ts"], 2) if job.get("started_ts") else None,
+            "fps": FPS, "model": restore_model_dir, "queue_id": job["id"],
+            "helper_elapsed_sec": result.get("elapsed_sec"),
+            "output_codec": output_codec_settings(),
+        }
+        write_sidecar(final_out.with_suffix(final_out.suffix + ".json"), sidecar)
+        job["output_path"] = str(final_out)
+        push(f"Colorize done in {sidecar['elapsed_sec']}s → {final_out.name}")
+        if p.get("open_when_done"):
+            subprocess.run(["open", str(final_out)], check=False)
+        return
+
+    if mode == "ingredients":
+        # Ingredients (multi-reference) — the FLAGSHIP IC-LoRA feature. 2-8
+        # subject images (a face + a prop + a location) are composed into ONE
+        # reference sheet, the sheet is looped to N frames as the IC
+        # video_conditioning, and the model composes them into one new clip.
+        # Reuses the generate_restore HELPER surface (same ICLoraPipeline +
+        # Q4 distilled + reference channel) — the only differences are the
+        # injected LoRA (Ingredients, strength 1.4), the single-stage recipe
+        # (skip_stage_2=True), and the two-field prompt. Default off; no other
+        # mode changes. Recipe matches the public Space
+        # ltx-community/ltx-2.3-ingredients-distilled.
+        try:
+            image_paths = json.loads(p.get("ingredient_images_json") or "[]")
+            if not isinstance(image_paths, list):
+                image_paths = []
+        except (ValueError, TypeError):
+            image_paths = []
+        image_paths = [str(x) for x in image_paths if x]
+        if len(image_paths) < 2:
+            raise RuntimeError(
+                f"Ingredients needs 2-8 reference images (got {len(image_paths)}). "
+                "Upload a face + a prop + a location in the Ingredients picker."
+            )
+        if len(image_paths) > 8:
+            # The sheet stays readable up to 8 cells; trim extras rather than
+            # erroring so a user who over-selected still gets a render.
+            push(f"Ingredients: {len(image_paths)} images selected; using the first 8.")
+            image_paths = image_paths[:8]
+        missing = [ip for ip in image_paths if not Path(ip).exists()]
+        if missing:
+            raise RuntimeError(
+                f"Ingredients: {len(missing)} reference image(s) not found on disk, "
+                f"e.g. {missing[0]!r}. Re-upload them in the Ingredients picker."
+            )
+        # The Ingredients prompt has two parts (Space's build_prompt):
+        #   "Reference sheet: <what's in the sheet>\n\nGenerated video: <action>"
+        # The panel sends them as `prompt` (the SHEET description) and
+        # `ingredient_action` (the action). If only one prompt was given, fall
+        # back gracefully so a render still happens.
+        sheet_desc = (p.get("prompt") or "").strip()
+        action_desc = (p.get("ingredient_action") or "").strip()
+        # Ingredients × Character — resolve the optional trained character LoRA
+        # up front. Its trigger word MUST appear in the action or the fused
+        # character delta won't fire, so prepend it when the user left it out
+        # (the UI injects it client-side too; this is the server-side safety net).
+        ing_char_lora = (p.get("ingredient_char_lora") or "").strip()
+        ing_char_trigger = (p.get("ingredient_char_trigger") or "").strip()
+        if ing_char_lora and ing_char_trigger:
+            if action_desc and ing_char_trigger.lower() not in action_desc.lower():
+                action_desc = f"{ing_char_trigger} {action_desc}"
+            elif not action_desc:
+                action_desc = ing_char_trigger
+        if sheet_desc and action_desc:
+            ing_prompt = f"Reference sheet: {sheet_desc}\n\nGenerated video: {action_desc}"
+        elif action_desc:
+            ing_prompt = f"Generated video: {action_desc}"
+        else:
+            ing_prompt = sheet_desc or "the subjects from the reference sheet, cinematic"
+        # Geometry: the Space fixes 768x448 base and, because skip_stage_2 runs
+        # a single stage, GENERATES at 2x (1536x896). Honor the form's frames
+        # (49/73/97/121), clamped to the 8k+1 rule. The tier max-dim caps the
+        # generated size so it fits memory on smaller Macs.
+        SHEET_BASE_W, SHEET_BASE_H = 768, 448
+        gen_w, gen_h = SHEET_BASE_W * 2, SHEET_BASE_H * 2   # skip_stage_2 → 2x
+        res_max = tier_max_dim("i2v")
+        if res_max and max(gen_w, gen_h) > res_max:
+            scale = res_max / float(max(gen_w, gen_h))
+            gen_w = max(32, (int(gen_w * scale) // 32) * 32)
+            gen_h = max(32, (int(gen_h * scale) // 32) * 32)
+            push(f"Ingredients: generated size clamped to {gen_w}x{gen_h} "
+                 f"({SYSTEM_CAPS['label']} tier).")
+        ing_frames = int(p.get("frames") or 0) or 121
+        if ing_frames % 8 != 1:
+            ing_frames = max(9, ing_frames - (ing_frames % 8) + 1)
+        # 1) Compose the sheet PNG, then 2) loop it into the conditioning clip.
+        # The clip is authored at the BASE (half-gen) resolution, NOT the gen
+        # size — exactly like the Space (`_sheet_to_video(sheet, 768, 448, …)`
+        # at 1x, then generate at 2x). The IC encoder resizes the reference to
+        # `height//2 × width//2` (ic_lora.py:365,378 → iclora_utils resize), so
+        # authoring at the gen size made the encoder DOWNSCALE 2x and changed
+        # the reference latent the model anchors on; authoring at half makes
+        # that resize an identity, matching the Space byte-for-byte.
+        cond_w = max(32, (gen_w // 2 // 32) * 32)
+        cond_h = max(32, (gen_h // 2 // 32) * 32)
+        UPLOADS.mkdir(parents=True, exist_ok=True)
+        sheet_png = UPLOADS / f".ingredients_{job['id']}_{stamp}_sheet.png"
+        cond_mp4 = UPLOADS / f".ingredients_{job['id']}_{stamp}_cond.mp4"
+        _compose_ingredient_sheet(image_paths, sheet_png)
+        _sheet_to_conditioning_clip(sheet_png, cond_w, cond_h, ing_frames, cond_mp4)
+        push(f"Ingredients: composed {len(image_paths)}-image sheet → "
+             f"{ing_frames}f conditioning clip at {cond_w}x{cond_h} "
+             f"(generate {gen_w}x{gen_h}).")
+        # Inject the Ingredients LoRA (prefer the installer-fetched local file;
+        # fall back to a TARGETED single-file fetch from the un-gated mirror —
+        # never a bare snapshot of the 708 GB mega-repo).
+        ing_meta = CURATED_LORAS["ingredients"]
+        ing_strength = float(ing_meta["default_strength"])   # 1.4
+        ing_lora_path = _ensure_ingredients_lora()
+        ingredients_loras = list(p.get("loras") or []) + [{
+            "path": ing_lora_path,
+            "strength": ing_strength,
+        }]
+        # Stack the optional trained character LoRA ON TOP of the Ingredients
+        # IC-LoRA. Both fuse additively into the Q4 distilled transformer
+        # (_fuse_loras loops every entry); the character carries identity while
+        # ref-strength stays 0.0, so the scene still recomposes instead of
+        # copying the sheet. STRENGTH IS A MOTION/IDENTITY TRADE-OFF, not "more
+        # is better": cranked too high (~1.6+) the character LoRA over-constrains
+        # the distilled video model and FREEZES the motion + smears distortion
+        # into the frame (validated by motion-strip A/B — char 1.8 = near-static,
+        # warped; char 1.0 = full natural camera motion but looser ID). The sweet
+        # spot is ~1.3 — real motion AND a recognizable trained face. Clamp the
+        # ceiling at 1.8 so a stray high value can't reintroduce the freeze.
+        if ing_char_lora and Path(ing_char_lora).exists():
+            try:
+                _char_str = float(p.get("ingredient_char_strength") or 1.3)
+            except (TypeError, ValueError):
+                _char_str = 1.3
+            _char_str = max(0.0, min(1.8, _char_str))
+            ingredients_loras.append({"path": ing_char_lora, "strength": _char_str})
+            push(f"Ingredients × Character: stacking {Path(ing_char_lora).name} "
+                 f"@ {_char_str} (trigger {ing_char_trigger!r}) on top of the "
+                 f"Ingredients IC-LoRA — identity from the LoRA, scene recomposed.")
+        elif ing_char_lora:
+            push(f"Ingredients × Character: selected character LoRA not found on "
+                 f"disk ({ing_char_lora!r}); rendering without it.")
+        out_name = f"ingredients_{stamp}.mp4"
+        final_out = OUTPUT / out_name
+        job["raw_path"] = str(final_out)
+        # Force Q4 distilled — the Ingredients LoRA was trained against
+        # transformer-distilled.safetensors (same rule HDR / Colorize use).
+        ing_model_dir = (str(MODELS_DIR / "ltx-2.3-mlx-q4")
+                         if (MODELS_DIR / "ltx-2.3-mlx-q4").is_dir()
+                         else str(MODELS_DIR))
+        # IC reference STRENGTH — the composition lever. This is the second
+        # element of each video_conditioning tuple, and it sets how clean the
+        # reference latent is held during denoise (VideoConditionByReferenceLatent
+        # uses mask_value = 1.0 - strength: 1.0 = reference pinned pristine,
+        # 0.0 = reference fully denoisable). Ingredients must RECOMPOSE the
+        # subjects into the prompted scene, NOT reproduce the reference sheet.
+        # At strength 1.0 the looped sheet is held pristine and the model copies
+        # it verbatim (measured MAD ~4.2/255, static 2x2 grid, prompted action
+        # absent). Crucially, conditioning_attention_strength does NOT fix this:
+        # an empirical CAS sweep is flat (MAD ~3.6-4.2 across CAS 0.0..1.0; even
+        # CAS=0.0 reproduces the grid). The reference STRENGTH is the real knob —
+        # MAD climbs 4.2(s=1.0) → 7.2(0.3) → 18(0.1) → 86(0.0), and only s=0.0
+        # yields a clean single composed shot with motion and preserved identity
+        # (the fused Ingredients LoRA carries the subjects when the literal sheet
+        # latent is no longer pinned). Default 0.0; tunable via
+        # LTX_INGREDIENTS_REF_STRENGTH for iteration; clamped to [0.0, 1.0].
+        # Colorize keeps its own strength (curated default, pristine reference)
+        # → byte-identical, this branch never touches it.
+        try:
+            ing_ref_strength = float(
+                os.environ.get("LTX_INGREDIENTS_REF_STRENGTH", "0.0"))
+        except (TypeError, ValueError):
+            ing_ref_strength = 0.0
+        ing_ref_strength = max(0.0, min(1.0, ing_ref_strength))
+        # Quality → single-stage vs two-stage. The original Ingredients recipe
+        # skipped stage 2 (the refine + 2x upscale), which is exactly what gave
+        # the dreamy "hallucination" look at 768x448. Running the SECOND stage
+        # cleans that up AND outputs at full 1536x896 — validated A/B: the trippy
+        # look is SINGLE-STAGE, not Q4 itself (Q8 sharpened faces but tripped the
+        # bizarrotrn gold-sparkle artifact and is off-spec for the Q4-trained
+        # IC-LoRA, so it's deliberately NOT used here). Mapping: only Quick/Draft
+        # stay single-stage (fast, smaller, the dreamy look on purpose);
+        # Balanced (the default) / Standard / High run two-stage (clean, full
+        # res). The per-tier res clamp above already caps gen size, so two-stage
+        # stays memory-safe on smaller Macs (Quick is the low-memory escape).
+        ing_quality = (p.get("quality") or "balanced").strip().lower()
+        ing_skip_stage_2 = ing_quality in ("quick", "draft")
+        job_spec = {
+            "action": "generate_restore",
+            "id": job["id"],
+            "params": {
+                "model_dir": ing_model_dir,
+                "prompt": ing_prompt,
+                "negative_prompt": p.get("negative_prompt", ""),
+                "output_path": str(final_out),
+                "height": gen_h,
+                "width": gen_w,
+                "frames": ing_frames,
+                "frame_rate": float(FPS),
+                "seed": p["seed"],
+                # The reference SHEET clip rides the IC reference channel. Its
+                # STRENGTH (not attention) is the composition lever — see above.
+                # 0.0 lets the model compose from the LoRA instead of copying
+                # the pinned sheet.
+                "video_conditioning": [[str(cond_mp4), ing_ref_strength]],
+                "loras": ingredients_loras,
+                # Quality-driven: Quick/Draft = single-stage (fast, dreamy);
+                # Balanced (default) / Standard / High = two-stage refine + 2x
+                # upscale (clean, full 1536x896). See ing_skip_stage_2 above.
+                "skip_stage_2": ing_skip_stage_2,
+                "stage1_steps": int(p.get("stage1_steps", 8)),
+                "stage2_steps": int(p.get("stage2_steps", 4)),
+            },
+        }
+        push(f"Ingredients via helper: id={job['id']} refs={len(image_paths)} "
+             f"{gen_w}x{gen_h} {ing_frames}f (Q4 distilled + Ingredients IC-LoRA, "
+             f"{'single-stage' if ing_skip_stage_2 else 'two-stage refine'} "
+             f"[{ing_quality}], LoRA strength {ing_strength}, "
+             f"ref strength {ing_ref_strength}).")
+        result = HELPER.run(job_spec)
+        if "seed_used" in result:
+            push(f"seed used: {result['seed_used']}")
+            p["seed_used"] = result["seed_used"]
+        # Best-effort cleanup of the scratch sheet + conditioning clip.
+        for scratch in (sheet_png, cond_mp4):
+            try:
+                scratch.unlink()
+            except OSError:
+                pass
+        sidecar = {
+            "output": str(final_out), "raw_output": str(final_out),
+            "params": {**p, "command": "ingredients"},
+            "started": job.get("started_at"),
+            "elapsed_sec": round(time.time() - job["started_ts"], 2) if job.get("started_ts") else None,
+            "fps": FPS, "model": ing_model_dir, "queue_id": job["id"],
+            "helper_elapsed_sec": result.get("elapsed_sec"),
+            "output_codec": output_codec_settings(),
+        }
+        write_sidecar(final_out.with_suffix(final_out.suffix + ".json"), sidecar)
+        job["output_path"] = str(final_out)
+        push(f"Ingredients done in {sidecar['elapsed_sec']}s → {final_out.name}")
         if p.get("open_when_done"):
             subprocess.run(["open", str(final_out)], check=False)
         return
@@ -7071,31 +8188,42 @@ def run_job_inner(job: dict) -> None:
             subprocess.run(["open", str(out_path)], check=False)
         return
 
-    # Audio → Video (A2VidPipelineTwoStage).
+    # Audio → Video (A2VidPipelineTwoStage / A2VidDistilledPipeline).
     # Pipeline drives generation FROM the input audio waveform. Optional
     # reference image conditions frame 0 (single picture; pipeline cover-
     # crops to target). Original audio is muxed onto the output by the
     # pipeline itself — no panel-side mux needed (unlike i2v_clean_audio).
-    # Always Q8 dev + distilled LoRA stage 2 (the pipeline requires both).
+    #
+    # Two backends:
+    #   Q8 tier  → A2VidPipelineTwoStage (dev + CFG + TeaCache)
+    #   Q4 tier  → A2VidDistilledPipeline (distilled, no CFG, 8+3 steps)
     if mode == "a2v":
-        if not SYSTEM_CAPS["allows_q8"]:
-            raise RuntimeError(
-                f"Audio → Video isn't supported on the {SYSTEM_CAPS['label']} "
-                f"hardware tier — the Q8 dev transformer + audio VAE peak "
-                f"doesn't fit. Bump to 64+ GB."
-            )
-        a2v_missing = q8_missing_files()
-        if a2v_missing:
-            raise RuntimeError(
-                f"Audio → Video requires the full Q8 model at {Q8_LOCAL_PATH}. "
-                f"Missing {len(a2v_missing)} file(s): {', '.join(a2v_missing[:3])}"
-                f"{' …' if len(a2v_missing) > 3 else ''}. "
-                f"Run: hf download {MODEL_ID_HQ} --local-dir {Q8_LOCAL_PATH}"
-            )
+        uses_q8 = SYSTEM_CAPS["allows_q8"]
+        if uses_q8:
+            a2v_missing = q8_missing_files()
+            if a2v_missing:
+                push(f"Q8 not available ({len(a2v_missing)} file(s) missing) "
+                     f"— falling back to Q4 distilled A2V pipeline")
+                uses_q8 = False
+        if uses_q8:
+            action = "generate_a2v"
+            model_dir = str(Q8_LOCAL_PATH)
+            default_stage1 = 20
+            default_stage2 = 3
+        else:
+            action = "generate_a2v_distilled"
+            model_dir = str(Q4_LOCAL_PATH)
+            default_stage1 = 8
+            default_stage2 = 3
         audio_src = (p.get("audio") or "").strip()
         if not audio_src or not Path(audio_src).exists():
             raise RuntimeError(f"audio file not found: {audio_src}")
         width, height = int(p["width"]), int(p["height"])
+        # Clamp resolution by tier cap (no-op when tier_max_dim returns 0).
+        max_dim = tier_max_dim("t2v")
+        if max_dim:
+            width = min(width, max_dim)
+            height = min(height, max_dim)
         frames = int(p["frames"])
         desc_stem = _descriptive_filename(
             p.get("label") or "", p.get("prompt") or "", fallback="a2v"
@@ -7124,41 +8252,39 @@ def run_job_inner(job: dict) -> None:
                 pass
         if ref_image_path and not Path(ref_image_path).exists():
             ref_image_path = None
-        # LoRAs flow through unchanged — useful for character A2V.
         a2v_loras = list(p.get("loras") or [])
         if p.get("hdr"):
             a2v_loras.append({
                 "path": CURATED_LORAS["hdr"]["repo_id"],
                 "strength": float(CURATED_LORAS["hdr"]["default_strength"]),
             })
-        job_spec = {
-            "action": "generate_a2v",
-            "id": job["id"],
-            "params": {
-                "model_dir": str(Q8_LOCAL_PATH),
-                "prompt": p["prompt"],
-                "negative_prompt": p.get("negative_prompt", ""),
-                "output_path": str(out_path),
-                "audio_path": audio_src,
-                "image": ref_image_path,
-                "height": height,
-                "width": width,
-                "frames": frames,
-                "frame_rate": float(FPS),
-                "seed": p["seed"],
-                "stage1_steps": int(p.get("stage1_steps", 20)),
-                "stage2_steps": int(p.get("stage2_steps", 3)),
-                "cfg_scale": float(p.get("cfg_scale", 3.0)),
-                "stg_scale": float(p.get("stg_scale", 1.0)),
-                "loras": a2v_loras,
-            },
+        a2v_params = {
+            "model_dir": model_dir,
+            "prompt": p["prompt"],
+            "negative_prompt": p.get("negative_prompt", ""),
+            "output_path": str(out_path),
+            "audio_path": audio_src,
+            "image": ref_image_path,
+            "height": height,
+            "width": width,
+            "frames": frames,
+            "frame_rate": float(FPS),
+            "seed": p["seed"],
+            "stage1_steps": int(p.get("stage1_steps", default_stage1)),
+            "stage2_steps": int(p.get("stage2_steps", default_stage2)),
+            "audio_conditioning_scale": float(p.get("audio_conditioning_scale", 1.0)),
         }
+        if uses_q8:
+            a2v_params["cfg_scale"] = float(p.get("cfg_scale", 3.0))
+            a2v_params["stg_scale"] = float(p.get("stg_scale", 1.0))
+            a2v_params["loras"] = a2v_loras
+        job_spec = {"action": action, "id": job["id"], "params": a2v_params}
         push(
-            f"Run A2V via helper: id={job['id']} {width}x{height} {frames}f · "
+            f"Run A2V ({'Q8' if uses_q8 else 'Q4-distilled'}) via helper: "
+            f"id={job['id']} {width}x{height} {frames}f · "
             f"audio={Path(audio_src).name}"
-            f"{' image=' + Path(ref_image_path).name if ref_image_path else ''} · "
-            f"{len(a2v_loras)} LoRA"
-            f"{'s' if len(a2v_loras) != 1 else ''}"
+            f"{' image=' + Path(ref_image_path).name if ref_image_path else ''}"
+            f" scale={a2v_params['audio_conditioning_scale']}"
         )
         result = HELPER.run(job_spec)
         if "seed_used" in result:
@@ -7166,13 +8292,13 @@ def run_job_inner(job: dict) -> None:
             p["seed_used"] = result["seed_used"]
         sidecar = {
             "output": str(out_path), "raw_output": str(out_path),
-            "params": {**p, "command": "generate_a2v", "audio": audio_src,
+            "params": {**p, "command": action, "audio": audio_src,
                        "image": ref_image_path},
             "started": job.get("started_at"),
             "elapsed_sec": round(time.time() - job["started_ts"], 2)
             if job.get("started_ts") else None,
             "video_duration_sec": video_duration(frames),
-            "fps": FPS, "model": str(Q8_LOCAL_PATH), "queue_id": job["id"],
+            "fps": FPS, "model": model_dir, "queue_id": job["id"],
             "helper_elapsed_sec": result.get("elapsed_sec"),
             "output_codec": output_codec_settings(),
         }
@@ -7380,13 +8506,16 @@ def run_job_inner(job: dict) -> None:
                 "stage2_steps": int(p.get("stage2_steps", 3)),
             },
         }
-        if helper:
-            push(f"Run HDR via helper: id={job['id']} {width}x{height} {frames}f")
-            helper.send(job_spec)
-            sidecar = helper.wait_done(job["id"])
-            push(f"HDR done in {sidecar['elapsed_sec']}s → {Path(raw_out).name}")
-        else:
-            raise RuntimeError("HDR requires the warm helper subprocess")
+        # WarmHelper exposes only .run(job_spec) (it serializes the whole
+        # round-trip and returns the done/error event) — the old
+        # helper.send()/helper.wait_done() pair never existed on this class,
+        # so this dispatch raised AttributeError if HDR were ever re-exposed.
+        # Match the EXTEND / restore branches: one HELPER.run call.
+        push(f"Run HDR via helper: id={job['id']} {width}x{height} {frames}f")
+        result = HELPER.run(job_spec)
+        if "seed_used" in result:
+            p["seed_used"] = result["seed_used"]
+        push(f"HDR done in {result.get('elapsed_sec')}s → {Path(raw_out).name}")
         # Post-process: same encode pass T2V/I2V get (mux audio, upscale,
         # write sidecar). Re-uses the standard tail of run_job_inner by
         # falling through to it — set up the bookkeeping fields the same
@@ -7446,13 +8575,19 @@ def run_job_inner(job: dict) -> None:
                 "stage1_steps": int(p.get("stage1_steps", 10)),
                 "stage2_steps": int(p.get("stage2_steps", 3)),
                 "cfg_scale": float(p.get("cfg_scale", 3.0)),
-                # Upstream HQ params (`LTX_2_3_HQ_PARAMS`) and the
-                # TwoStageHQPipeline signature both default stg_scale=0.0.
-                # HQ uses res_2s sampler with `stg_blocks=[]`, so STG is
-                # meant to be off — passing 1.0 burns one extra forward
-                # pass per outer step (~33% slower) for nothing. Was 1.0
-                # by mistake (copy from standard params); fixed here.
-                "stg_scale": 0.0,
+                # STG (Spatio-Temporal Guidance) scale — driven by the
+                # "detail guidance" slider (make_job clamps to 0.0–4.0;
+                # default 0.0 = OFF). The TwoStageHQPipeline signature
+                # defaults stg_scale=0.0 AND forces stg_blocks=[] when no
+                # explicit guider params are passed, so a bare stg_scale>0
+                # would burn an extra forward pass per outer step for zero
+                # effect. The helper's generate_hq branch closes that gap:
+                # when stg_scale>0 it builds explicit video/audio guider
+                # params with stg_blocks=[28] (the block the one/two-stage
+                # pipelines perturb) so the knob actually engages. At 0.0
+                # the helper passes nothing extra → byte-identical to the
+                # prior hardcoded-0.0 behaviour.
+                "stg_scale": float(p.get("stg_scale", 0.0)),
                 "enable_teacache": True,
                 # HQ TeaCache default — see make_job comment. 1.8 is the
                 # empirical sweet spot for character mode (revert from
@@ -8611,6 +9746,10 @@ class Handler(BaseHTTPRequestHandler):
                 "extend_max_dim": SYSTEM_CAPS["extend_max_dim"],
                 "times": SYSTEM_CAPS.get("times", {}),
             }
+            payload["train_profile"] = TRAIN_PROFILE
+            payload["train_presets"] = TRAIN_PRESETS
+            payload["train_style_presets"] = TRAIN_STYLE_PRESETS
+            payload["generation_profile"] = GENERATION_PROFILE
             # Active model-download status — UI shows a progress strip when
             # this is set. last_line is the most recent hf output line so the
             # user gets live feedback even before opening the log panel.
@@ -9221,7 +10360,10 @@ class Handler(BaseHTTPRequestHandler):
                     if not _is_character_lora(l, blocked_names)
                 ]
             curated = [c for c in list_curated_loras()
-                       if not c.get("is_hdr_toggle")]
+                       if not c.get("is_hdr_toggle")
+                       and not c.get("is_restore_lora")
+                       and not c.get("is_ingredients_lora")
+                       and not c.get("is_control_lora")]
             self._json({
                 "user": user_loras,
                 "curated": curated,
@@ -9303,6 +10445,14 @@ class Handler(BaseHTTPRequestHandler):
         # for the discovery rules.
         if parsed.path == "/characters":
             self._json({"characters": list_characters()})
+            return
+
+        # Progress poll for the one-click sample-character download.
+        if parsed.path == "/characters/download-sample/status":
+            with _sample_char_lock:
+                st = dict(_sample_char_state)
+            st["present"] = _sample_character_present()
+            self._json(st)
             return
 
         # Serve the sample training image for a character so the browser
@@ -9908,6 +11058,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "queued": True,
                         "hint": "fetch running in background; reload "
                                 "/stats in ~15 s for fresh numbers"}, 202)
+            return
+
+        # One-click: fetch the shipped sample character so a user can try
+        # Character / Remix without training their own first. ~817 MB, so it
+        # runs in a background thread + returns 202; the UI polls
+        # /characters/download-sample/status until status == done|error.
+        if path == "/characters/download-sample":
+            if _sample_character_present():
+                self._json({"ok": True, "status": "done", "already": True,
+                            "character_id": SAMPLE_CHARACTER["trigger"]})
+                return
+            with _sample_char_lock:
+                already_running = _sample_char_state.get("status") == "downloading"
+            if not already_running:
+                _set_sample_state(status="downloading", mb=0,
+                                  total_mb=SAMPLE_CHARACTER["size_bytes"] // (1 << 20),
+                                  error=None)
+                threading.Thread(target=_download_sample_character_bg,
+                                 daemon=True, name="phos-sample-char").start()
+            self._json({"ok": True, "status": "downloading"}, 202)
             return
 
         # Multipart upload
@@ -11154,11 +12324,11 @@ class Handler(BaseHTTPRequestHandler):
                     }, 400)
                     return
             # Make sure the form has the canonical image_count so make_job's
-            # estimate is right even if the JS forgot to set it.
+            # estimate and step cap use the dataset on disk, not stale JS state.
             form["mode"] = ["train"]
             form["train_job_id"] = [train_job_id]
             form["train_type"] = [train_type]
-            form.setdefault("image_count", [str(len(image_files))])
+            form["image_count"] = [str(len(image_files))]
             job = make_job(form)
             with QUEUE_COND:
                 STATE["queue"].append(job)
@@ -11208,13 +12378,17 @@ class Handler(BaseHTTPRequestHandler):
                                  f"{CAPTION_STATE.get('train_job_id')}",
                     }, 409)
                     return
-                # Refuse if a training job is in flight on the same
-                # dataset — captioning would race the training preprocess.
+                # Refuse while ANY GPU job is in flight. This originally only
+                # blocked training, which allowed Gemma auto-captioning to run
+                # beside a long video render. On 48 GB Macs that pushes MLX
+                # into compressor/swap, and the active render usually never
+                # recovers speed mid-job even after Gemma exits.
                 cur = STATE.get("current")
-                if cur and cur.get("params", {}).get("mode") == "train":
+                if cur or _GPU_LOCK.locked():
+                    cur_mode = ((cur or {}).get("params") or {}).get("mode") or "render"
                     self._json({
-                        "error": "training is currently running — wait for "
-                                 "it to finish before auto-captioning",
+                        "error": f"GPU is busy with {cur_mode} — wait for the "
+                                 "current job to finish before auto-captioning",
                     }, 409)
                     return
                 # Reset state for this run.
@@ -13059,6 +14233,12 @@ def page() -> str:
         "profile": PROFILE,
         "model_upscale_enabled": MODEL_UPSCALE_ENABLED,
         "pipersr_upscale_enabled": PIPERSR_UPSCALE_ENABLED,
+        "train_presets": TRAIN_PRESETS,
+        "train_style_presets": TRAIN_STYLE_PRESETS,
+        "train_profile": TRAIN_PROFILE,
+        "train_min_images": TRAIN_MIN_IMAGES,
+        "train_max_images": TRAIN_MAX_IMAGES,
+        "generation_profile": GENERATION_PROFILE,
         # Hardware-aware time estimates for the Quality pills. The pill HTML
         # ships with the Comfortable-tier defaults; on boot we rewrite the
         # subtext using the active tier's quality_times. Compact users see
@@ -13579,12 +14759,6 @@ HTML = r"""<!doctype html>
        toggle (Pass 6) for quick non-character drafts. */
     body[data-cap-tier="q4"] #modeGroup [data-mode="keyframe"],
     body[data-cap-tier="q4"] #modeGroup [data-mode="extend"],
-    body[data-cap-tier="q4"] #modeGroup [data-mode="character"],
-    body[data-cap-tier="q4"] #manualCharactersPickerSlot,
-    body[data-cap-tier="q4"] #charactersPickerDivider,
-    body[data-cap-tier="q4"] #qualityGroupCharacter,
-    body[data-cap-tier="q4"] #charSkipstepToggleWrap,
-    body[data-cap-tier="q4"] #workflowTabs button[data-workflow="audio"],
     body[data-cap-tier="q4"] #qualityGroup [data-quality="high"] { display: none !important; }
     /* Quality strip becomes a 3-col grid (Quick/Balanced/Standard)
        since the 4th column ("High") is gone. */
@@ -13614,6 +14788,19 @@ HTML = r"""<!doctype html>
     }
     textarea { min-height: 84px; resize: vertical; font-family: inherit; }
     textarea.avoid-textarea { min-height: 54px; }
+
+    /* Range slider strip (used in Audio Studio, etc.) */
+    .range-strip {
+      display: flex; align-items: center; gap: 10px;
+    }
+    .range-strip input[type="range"] {
+      flex: 1 1 auto; accent-color: var(--accent, #2f81f7);
+      padding: 0; border: none; background: none;
+    }
+    .range-val {
+      min-width: 32px; text-align: center; font-size: 14px;
+      font-weight: 600; color: var(--accent, #2f81f7);
+    }
 
     /* Pill button groups (mode/quality/aspect) */
     .pill-group {
@@ -17522,6 +18709,36 @@ HTML = r"""<!doctype html>
     .picker-recent-thumb:hover { border-color: var(--accent, #5a7cff); transform: translateY(-1px); }
     .picker-recent-thumb.selected { border-color: var(--success, #3fb950); }
 
+    /* Ingredients (multi-reference) picker — drop tile + thumbnail grid. */
+    .ingredients-drop { min-height: 96px; }
+    .ingredients-thumbs {
+      display: grid; gap: 8px; margin-top: 8px;
+      grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    }
+    .ingredients-thumbs:empty { margin-top: 0; }
+    .ingredient-thumb {
+      position: relative; aspect-ratio: 1 / 1; border-radius: 8px;
+      overflow: hidden; border: 1px solid var(--border, #2a3140);
+      background: rgba(255,255,255,0.04);
+    }
+    .ingredient-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .ingredient-thumb-x {
+      position: absolute; top: 4px; right: 4px;
+      width: 22px; height: 22px; border-radius: 50%; border: none;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.62); color: #fff; cursor: pointer;
+      transition: background 120ms ease;
+    }
+    .ingredient-thumb-x:hover { background: var(--danger, #d9534f); }
+    .ingredient-thumb-x .ph { width: 12px; height: 12px; }
+    .ingredient-thumb-n {
+      position: absolute; bottom: 4px; left: 4px;
+      min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 600; line-height: 1;
+      background: rgba(0,0,0,0.62); color: #fff;
+    }
+
     /* LoRA picker — collapsible <details>. Compact list rows (Y1.007).
        Distinct visual section so users notice it (Y1.008): wrapped in a
        bordered container, separator dividers above/below, custom chevron
@@ -17967,6 +19184,19 @@ HTML = r"""<!doctype html>
       padding: 4px 2px;
     }
     .chars-strip-empty a { color: var(--accent-bright); }
+
+    /* Q4-tier honesty note under the character strip. Hidden by default so
+       Q8-capable machines never see it; shown only when the page renders in
+       the Q4 tier (16 GB / Q4 fallback), where a character fuses into the
+       distilled base and identity comes out approximate vs. faithful on Q8. */
+    .chars-q4-note { display: none; }
+    body[data-cap-tier="q4"] .chars-q4-note {
+      display: block;
+      font-size: 11px; line-height: 1.5;
+      color: var(--muted);
+      padding: 4px 2px 2px;
+    }
+    body[data-cap-tier="q4"] .chars-q4-note b { color: var(--text); font-weight: 600; }
 
     /* Manage characters modal — list view with rename + delete per row. */
     .chars-manage-list {
@@ -19563,6 +20793,15 @@ HTML = r"""<!doctype html>
            chooses any total anchor count from 3–8. -->
       <button type="button" class="mode-chip pill-btn" data-mode="keyframe" data-kf-default="multi">Keyframes<span class="mc-sub sub">3–8 frames</span></button>
       <button type="button" class="mode-chip pill-btn" data-mode="extend">Extend<span class="mc-sub sub">continue a clip</span></button>
+      <!-- Remix — the IC-LoRA reference tools (Ingredients / Control / Colorize)
+           grouped under ONE pill so the mode bar stays uncluttered. All three
+           run on Q4 distilled (unlike FFLF/Extend/Character, which are Q8-only
+           and hidden on the Q4 tier), so the parent is visible at every tier.
+           Clicking it reveals #remixSubGroup and resumes the last-used tool
+           (default Ingredients). The backend modes stay ingredients/control/
+           restore — this is PURE UI grouping (see REMIX_MODES + setMode + the
+           #remixSubGroup click wiring). -->
+      <button type="button" class="mode-chip pill-btn" data-mode="remix">Remix<span class="mc-sub sub">your media → new video</span></button>
       <!-- "Train" used to live here as a mode chip; promoted 2026-05-15 to
            a workflow tier (top tab strip). "Studio" (image generation) also
            lived here until 2026-05-17 — Mr Bizarro flagged that mixing image gen
@@ -19570,6 +20809,20 @@ HTML = r"""<!doctype html>
            promoted to its own workflow tab as well. setMode('image') is
            still the entry point; workflowSwitch('studio') just calls it
            after hiding the other panes. -->
+    </div>
+
+    <!-- Remix sub-tools — second-level selector, visible ONLY when a Remix mode
+         is active (toggled in setMode via REMIX_MODES). Each sub-pill sets the
+         REAL backend mode (data-remix → setMode); the parent Remix pill above
+         stays lit. Inline styles use var(--x, fallback) so they're safe whether
+         or not the theme defines those vars. -->
+    <div id="remixSubGroup" style="display:none;margin:-2px 0 12px;padding:9px 11px;border:1px solid var(--line,#262a33);border-left:3px solid var(--accent,#8b7bff);border-radius:11px;background:var(--accent-wash,rgba(139,123,255,.06))">
+      <div style="font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--dim,#7a8194);margin-bottom:7px">Remix tool · bring your own media</div>
+      <div class="mode-bar pill-group">
+        <button type="button" class="mode-chip pill-btn" data-remix="ingredients">Ingredients<span class="mc-sub sub">2–8 refs → one clip</span></button>
+        <button type="button" class="mode-chip pill-btn" data-remix="control">Control<span class="mc-sub sub">drive from a video</span></button>
+        <button type="button" class="mode-chip pill-btn" data-remix="restore">Colorize<span class="mc-sub sub">B&amp;W clip → color</span></button>
+      </div>
     </div>
 
     <form id="genForm">
@@ -19617,6 +20870,7 @@ HTML = r"""<!doctype html>
                   title="Rescan mlx_models/characters/ for new bundles"
                   onclick="refreshManualCharacters()"><svg class="ph" aria-hidden="true"><use href="#ph-arrow-clockwise-bold"/></svg></button>
         </div>
+        <div class="chars-q4-note"><b>Q4 fallback:</b> on this machine characters render on the fast (distilled) base — identity comes out <em>approximate</em>. A Q8-capable Mac renders faithful faces.</div>
         <!-- One-liner that surfaces under the strip when a character is
              active. Shows trigger word + a tiny strength control inline.
              charsSummaryMeta stays as a hidden carrier for legacy JS
@@ -19626,7 +20880,12 @@ HTML = r"""<!doctype html>
         <!-- Empty state — visible only when no bundles exist on disk. -->
         <div class="chars-strip-empty" id="charsEmpty" hidden>
           No trained characters yet —
-          <a href="#" onclick="workflowSwitch('train'); return false;">train one in the Train tab</a>.
+          <a href="#" onclick="workflowSwitch('train'); return false;">train one in the Train tab</a>,
+          or
+          <button type="button" class="ghost-btn js-get-sample-char" style="padding:2px 8px;font-size:12px"
+                  onclick="downloadSampleCharacter()">get a sample character (Bizarro)</button>
+          to try it right now.
+          <div class="js-get-sample-char-status" style="font-size:12px;opacity:.9;margin-top:6px" hidden></div>
         </div>
         <!-- Strength row carrier (kept in DOM for JS toggles; hidden
              from view — the slider lives inside charsAppliedNote when a
@@ -19795,6 +21054,83 @@ HTML = r"""<!doctype html>
             <input type="hidden" name="extend_steps" id="extend_steps" value="12">
             <input type="hidden" name="extend_cfg"   id="extend_cfg"   value="1.0">
             <div class="hint">Each latent ≈ 8 frames (~0.33s). Q8 Pro runs the upstream Lightricks defaults but pushes 1280×704 into swap on 64 GB Macs (~2 hr/render). Stick with Q8 Draft unless you've got more RAM.</div>
+          </div>
+
+          <!-- Colorize (restore) — source-video picker, cloned from the
+               Extend block. The user picks a B&W / desaturated clip; the
+               Colorize IC-LoRA rides it on the reference channel and paints
+               in natural color. Q4 distilled (no Q8 needed). Shown/hidden by
+               updateDerived() when currentMode === 'restore'. -->
+          <div class="mode-only" id="restoreSection">
+            <h2>Source video to colorize</h2>
+            <select id="restoreSrcSelect" onchange="document.getElementById('restore_video_path').value=this.value"></select>
+            <input name="restore_video_path" id="restore_video_path" placeholder="/path/to/blackandwhite.mp4" style="margin-top:6px">
+            <div class="hint" style="margin-top:6px">Pick a black-and-white or washed-out clip. The prompt below describes the colors to paint in (e.g. "golden warm sunlight, blue sky, green grass"). Output matches the source's resolution + length. Runs on Q4 — no Q8 needed.</div>
+          </div>
+
+          <!-- Ingredients (multi-reference) — the flagship IC-LoRA. Pick 2-8
+               subject images (a face + a prop + a location); they're tiled
+               into one reference sheet and the model composes them into a new
+               clip. The prompt below describes WHAT'S in the sheet; the Action
+               field describes the shot. Q4 distilled. Shown/hidden by
+               updateDerived() when currentMode === 'ingredients'. -->
+          <div class="mode-only" id="ingredientsSection">
+            <h2>Reference images <span class="hint" style="font-weight:400">· 2–8 (a face + a prop + a location)</span></h2>
+            <div class="ingredients-picker">
+              <div class="picker-drop ingredients-drop" id="ingredients_drop">
+                <div class="picker-empty">
+                  <div class="picker-icon"><svg class="ph"><use href="#ph-image"/></svg></div>
+                  <div class="picker-cta">Drop images here, or <strong>click to browse</strong></div>
+                  <div class="hint">PNG / JPG / WEBP · pick 2–8 — they tile into one reference sheet</div>
+                </div>
+              </div>
+              <input type="file" id="ingredients_file" accept="image/*" multiple style="display:none">
+              <input type="hidden" name="ingredient_images_json" id="ingredient_images_json" value="[]">
+              <div class="ingredients-thumbs" id="ingredients_thumbs"></div>
+              <div class="picker-recent" id="ingredients_recent_wrap" style="display:none">
+                <div class="picker-recent-label">Recent uploads · click to add</div>
+                <div class="picker-recent-strip" id="ingredients_recent"></div>
+              </div>
+            </div>
+            <h2 style="margin-top:14px">Action / shot to generate</h2>
+            <textarea id="ingredient_action" name="ingredient_action" class="composer-prompt" style="min-height:64px"
+                      placeholder="What happens in the clip — e.g. the hedgehog waddles up and waves, the rabbit hops past with a spray bottle; warm acoustic jingle, cheerful voice, soft footsteps."></textarea>
+            <div class="hint" style="margin-top:6px">The big prompt below describes WHAT'S in the reference sheet (each character, prop, and the location). This Action field describes the shot itself. Runs on Q4 — no Q8 needed.</div>
+
+            <!-- Ingredients × Character — OPTIONAL trained character LoRA stacked
+                 on top of the Ingredients IC-LoRA so the SAME trained face lands
+                 in every composed scene. Options are filled from _knownUserLoras
+                 (kind=train_character) by populateIngredientCharLoras(). The
+                 selected character's trigger rides a hidden field; the server
+                 prepends it to the action if missing so the LoRA fires. -->
+            <div id="ingredientCharWrap" style="margin-top:16px">
+              <h2 style="margin-bottom:0">Character <span class="hint" style="font-weight:400">· optional — drop your trained face into every scene</span></h2>
+              <select id="ingredient_char_lora" name="ingredient_char_lora" onchange="onIngredientCharChange()" style="margin-top:6px"></select>
+              <input type="hidden" name="ingredient_char_strength" id="ingredient_char_strength" value="1.3">
+              <input type="hidden" name="ingredient_char_trigger" id="ingredient_char_trigger" value="">
+              <div id="ingredientCharEmpty" class="hint" style="margin-top:8px;display:none">No trained characters yet — train one in the <strong>Character</strong> tab and it appears here. Then your face composes into any scene you build.</div>
+              <div id="ingredientCharTune" style="margin-top:8px;display:none">
+                <div class="hint">Identity comes from the LoRA, not a face photo — so the same face holds across every scene (tighter than a reference image alone). The references still set the props, wardrobe, and location. <strong>Strength is a trade-off:</strong> higher = tighter face but stiffer motion; lower = freer, more natural motion. ~1.3 is the sweet spot.</div>
+                <div style="margin-top:8px;display:flex;align-items:center;gap:10px">
+                  <span class="hint" style="white-space:nowrap">Identity strength <strong id="ingCharStrLabel">1.3</strong></span>
+                  <input type="range" min="0.8" max="1.8" step="0.1" value="1.3" id="ingCharStrSlider" oninput="onIngredientCharStrength(this.value)" style="flex:1;max-width:280px">
+                </div>
+                <div id="ingredientCharTrigHint" class="hint" style="margin-top:6px"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Control (Union) — control-video picker, cloned from the Colorize
+               (restore) source block. The user picks a RAW RGB clip; the Union
+               IC-LoRA rides it on the reference channel at follow-strength so
+               the render inherits its motion/structure/composition while the
+               prompt swaps the subject/scene. Q4 distilled (no Q8 needed).
+               Shown/hidden by updateDerived() when currentMode === 'control'. -->
+          <div class="mode-only" id="controlSection">
+            <h2>Control video</h2>
+            <select id="controlSrcSelect" onchange="document.getElementById('control_video_path').value=this.value"></select>
+            <input name="control_video_path" id="control_video_path" placeholder="/path/to/control.mp4" style="margin-top:6px">
+            <div class="hint" style="margin-top:6px">Pick a clip whose <strong>motion, structure, and composition</strong> you want to drive the render. The prompt below describes the NEW subject/scene to paint onto that structure (e.g. "a red origami crane unfolding"). Raw video works — a depth/pose map is an optional precision upgrade, not required. Output matches the control clip's resolution + length. Runs on Q4 — no Q8 needed.</div>
           </div>
         </div>
 
@@ -20157,6 +21493,31 @@ HTML = r"""<!doctype html>
                   <span>Exact</span>
                   <span class="sub">TeaCache only · slower, reference</span>
                 </button>
+              </div>
+            </div>
+
+            <!-- STG (Spatio-Temporal Guidance) — "detail guidance". The Q8 HQ
+                 res_2s guider adds stg_scale·(cond - perturbed) to the
+                 prediction (guiders.py MultiModalGuider.calculate), which
+                 cleans up motion + fine detail at the cost of an extra forward
+                 pass per outer step (slower). 0.0 = OFF (default — the guider
+                 short-circuits at exactly 0.0). Only acts on the Q8 HQ path
+                 (quality=high); the Q4 distilled paths ignore STG entirely, so
+                 the row is revealed only when quality=high (same gating as the
+                 HQ-speed row above — _applyStgRowVisibility). The range input
+                 carries name="stg_scale" so FormData collects it; the submit
+                 handler also fd.set()s it explicitly. -->
+            <div id="stgRow" class="cz-control" hidden>
+              <div class="cz-label">STG — detail guidance
+                <span class="cz-label-hint">cleaner motion &amp; detail, slower · 0 = off · try 1&ndash;1.5</span>
+              </div>
+              <div class="characters-strength-control" style="display:flex;align-items:center;gap:10px;">
+                <input type="range" name="stg_scale" id="stgScale"
+                       min="0" max="4" step="0.5" value="0"
+                       style="flex:1;width:auto"
+                       oninput="document.getElementById('stgScaleValue').textContent = (this.value==='0' ? 'Off' : (+this.value).toFixed(1));"
+                       title="0 = off (no quality/speed change). 1.0–1.5 is a sensible starting band for a visible detail/motion lift; higher = stronger but slower and can over-sharpen.">
+                <span class="characters-strength-value" id="stgScaleValue">Off</span>
               </div>
             </div>
 
@@ -20678,6 +22039,11 @@ HTML = r"""<!doctype html>
             once a <code>&lt;trigger&gt;_v2.safetensors</code> LoRA lands in <code>mlx_models/loras/</code> it shows up here automatically.
             Add a matching <code>.audio.safetensors</code> for voice; without it the character is silent.
           </div>
+          <div style="margin-top:16px;display:flex;flex-direction:column;align-items:center;gap:8px">
+            <button type="button" class="primary-btn js-get-sample-char" onclick="downloadSampleCharacter()">Get a sample character (Bizarro)</button>
+            <div style="font-size:12px;opacity:.7;max-width:34rem;line-height:1.5">Don't want to train one yet? Grab a ready-made character (~817&nbsp;MB, one-time) and try Character &amp; Remix right now.</div>
+            <div class="js-get-sample-char-status" style="font-size:12px;opacity:.9" hidden></div>
+          </div>
         </div>
       </div>
 
@@ -21043,6 +22409,7 @@ HTML = r"""<!doctype html>
               <span class="mf-label">Rank</span>
               <select id="trainRank">
                 <option value="">preset default</option>
+                <option value="4">4</option>
                 <option value="8">8</option>
                 <option value="16">16</option>
                 <option value="32">32</option>
@@ -21067,6 +22434,8 @@ HTML = r"""<!doctype html>
               <span class="mf-label">Resolution</span>
               <select id="trainResolution">
                 <option value="">preset default</option>
+                <option value="384">384²</option>
+                <option value="448">448²</option>
                 <option value="512">512²</option>
                 <option value="576">576²</option>
                 <option value="768">768²</option>
@@ -21269,48 +22638,57 @@ HTML = r"""<!doctype html>
 
         <textarea id="audioStudioPrompt" class="composer-prompt" rows="4"
                   placeholder="A photoreal medium close-up of a woman speaking to camera, soft daylight, shallow depth of field, natural skin pores"></textarea>
+        <div class="composer-tools">
+          <button type="button" class="ghost-btn" id="audioStudioEnhanceBtn" onclick="audioStudioEnhancePrompt()" title="Use Gemma to rewrite your prompt"><svg class="ph" aria-hidden="true" style="margin-right:6px"><use href="#ph-sparkle-fill"/></svg>Enhance</button>
+          <span class="ct-spacer"></span>
+        </div>
       </div>
 
       <div class="studio-status-row" style="margin: 6px 0 -4px;">
         <span id="audioStudioStatus" class="hint"></span>
       </div>
 
-      <!-- Quick settings: aspect / duration / seed / quality.
-           Aspect maps to the same width/height table the Characters tab
-           uses (1024×576 high, 736×416 draft). Duration → frames at
-           8k+1 cadence the model expects. -->
+      <!-- Quick settings: width / height / duration / seed.
+           Width/height are free-form; the panel snaps to 32 px multiple.
+           Duration slider covers 1–30 s; JS rounds frames to 8k+1. -->
       <div class="quick-settings">
         <div>
           <div class="mini-fields">
             <div class="mf-cell">
-              <span class="mf-label">Aspect</span>
-              <select id="audioStudioAspect" style="padding:7px 9px;font-size:13px;">
-                <option value="16:9" selected>16:9 — 1024×576</option>
-                <option value="9:16">9:16 — 576×1024</option>
-                <option value="1:1">1:1 — 768×768</option>
-                <option value="4:3">4:3 — 832×608</option>
-              </select>
+              <span class="mf-label">Width</span>
+              <input type="number" id="audioStudioWidth" value="1024" min="256" max="1920" step="32">
             </div>
             <div class="mf-cell">
-              <span class="mf-label">Duration</span>
-              <select id="audioStudioDuration" style="padding:7px 9px;font-size:13px;">
-                <option value="5">5 s</option>
-                <option value="7" selected>7 s</option>
-                <option value="10">10 s</option>
-              </select>
+              <span class="mf-label">Height</span>
+              <input type="number" id="audioStudioHeight" value="576" min="256" max="1920" step="32">
             </div>
             <div class="mf-cell">
               <span class="mf-label">Seed</span>
               <input type="number" id="audioStudioSeed" value="-1" placeholder="-1 = random">
             </div>
           </div>
+          <div class="mf-cell" style="margin-top:8px">
+            <span class="mf-label">Duration</span>
+            <div class="range-strip">
+              <input type="range" id="audioStudioDuration" min="1" max="30" step="1" value="7"
+                     oninput="document.getElementById('audioStudioDurationVal').textContent=this.value + ' s'">
+              <span id="audioStudioDurationVal" class="range-val">7 s</span>
+            </div>
+          </div>
+          <div class="mf-cell" style="margin-top:8px">
+            <span class="mf-label">Audio conditioning strength</span>
+            <div class="range-strip">
+              <input type="range" id="audioConditioningScale" min="0.5" max="5.0" step="0.1" value="1.0"
+                     oninput="document.getElementById('audioConditioningScaleVal').textContent=this.value">
+              <span id="audioConditioningScaleVal" class="range-val">1.0</span>
+            </div>
+            <div class="hint" style="margin-top:2px">Higher = stronger audio adhesion, lower visual flexibility</div>
+          </div>
         </div>
       </div>
 
-      <div class="hint" style="margin-top:8px">
-        Audio → Video uses the Q8 dev transformer with audio conditioning.
-        Wall time is similar to High-quality I2V (~7–9 min on a 64 GB M-Max
-        for a 7 s 1024×576 clip).
+      <div class="hint" style="margin-top:8px" id="audioStudioHint">
+        Audio → Video uses audio conditioning during generation (not post-hoc mux). Some seeds may not work properly — retry if the mouth doesn't move.
       </div>
 
       <div class="form-action-footer" id="audioStudioFooter">
@@ -22203,6 +23581,10 @@ let filterMode = 'visible';
 let activePath = null;
 let currentOutputs = [];
 let currentMode = 't2v';
+// REMIX_MODES — the IC-LoRA reference tools grouped under the single "Remix"
+// mode pill. These are REAL backend modes (the #mode field + the dispatch see
+// them); "remix" itself is a UI-only pseudo-mode that resolves to one of these.
+const REMIX_MODES = ['ingredients', 'control', 'restore'];
 
 // Main right-pane gallery kind filter (All / Videos / Photos). Independent
 // of `filterMode` (which is visible/hidden) and independent of
@@ -22370,7 +23752,7 @@ function _autoMainOutputsFilterForMode(mode) {
   // Auto-set NEVER lands on 'all' — that's user-only, per spec.
   let target = null;
   if (mode === 'image') target = 'photos';
-  else if (mode === 't2v' || mode === 'i2v' || mode === 'keyframe' || mode === 'extend') target = 'videos';
+  else if (mode === 't2v' || mode === 'i2v' || mode === 'keyframe' || mode === 'extend' || mode === 'restore' || mode === 'ingredients' || mode === 'control') target = 'videos';
   if (!target) return;
   // Same-filter early-return is conditional now: if the filter is already
   // on `target` but the visible list is empty AND we haven't loaded the
@@ -22452,12 +23834,21 @@ function syncAvoidRowFromValue() {
 }
 
 function setMode(mode) {
-  // Capability guard — Q4 (sub-48GB) tier can't run FFLF, Extend, or
-  // Character (HQ-only pipelines + Q8 trainer-base contract). CSS already
-  // hides the chips, but a stale localStorage, charactersLoadParams(), or
-  // a JS caller could still try to switch. Snap to t2v with a console
-  // warning so we never end up in an unrenderable mode by accident.
-  if (window.PHOSPHENE_CAP_TIER === 'q4' && (mode === 'keyframe' || mode === 'extend' || mode === 'character')) {
+  // "remix" is a UI GROUP, not a backend mode — clicking the parent Remix pill
+  // resumes the last-used Remix tool (default Ingredients). Everything below
+  // (and the backend) only ever sees a real mode from REMIX_MODES.
+  if (mode === 'remix') mode = window._lastRemixMode || 'ingredients';
+  // Capability guard — Q4 (sub-48GB) tier can't run FFLF or Extend
+  // (Q8-only pipelines). CSS already hides the chips, but a stale
+  // localStorage, charactersLoadParams(), or a JS caller could still try
+  // to switch. Snap to t2v with a console warning so we never end up in an
+  // unrenderable mode by accident. Character IS available on Q4 (the LoRA
+  // fuses into the distilled base — identity match is mediocre but the
+  // render completes), so it's deliberately NOT in this list.
+  // NOTE: 'restore' (Colorize) is also NOT in this list — its IC-LoRA was
+  // trained against the Q4 distilled checkpoint, so it RUNS on the Q4 tier.
+  // Don't add either back here or you'll break the feature on sub-48GB.
+  if (window.PHOSPHENE_CAP_TIER === 'q4' && (mode === 'keyframe' || mode === 'extend')) {
     console.warn(`setMode(${mode}): not available on Q4 tier — snapping to t2v`);
     mode = 't2v';
   }
@@ -22499,9 +23890,10 @@ function setMode(mode) {
   }
   if (mode === 'character') {
     // Character is a UI intent, not a backend mode — the hidden #mode
-    // field still ships 't2v' on submit. make_job sees character_id +
-    // routes to Q8 HQ. CSS-only chrome (chip strip + Q8 quality strip)
-    // makes the cascade visible.
+    // field still ships 't2v' on submit. make_job sees character_id and
+    // expands it into face+audio LoRAs. On Q8, the quality strip swaps
+    // to Q8 Draft/Pro; on Q4, the regular quality pills stay visible
+    // and the LoRAs fuse into the distilled base.
     if (studio) studio.classList.remove('show');
     if (train) train.classList.remove('show');
     if (genForm) genForm.style.display = '';
@@ -22591,10 +23983,24 @@ function setMode(mode) {
   document.querySelectorAll('#modeGroup .pill-btn').forEach(b => {
     if (mode === 'keyframe') {
       b.classList.toggle('active', isKeyframeModeChipActive(b, window._kfMode));
+    } else if (b.dataset.mode === 'remix') {
+      // The parent Remix pill stays lit for ANY of its sub-tools.
+      b.classList.toggle('active', REMIX_MODES.indexOf(mode) !== -1);
     } else {
       b.classList.toggle('active', b.dataset.mode === mode);
     }
   });
+  // Remix group: reveal the sub-tool row + light the active sub-pill when the
+  // current mode is one of the Remix tools; hide the row otherwise. Remember
+  // the last Remix tool so the parent pill resumes it next time it's clicked.
+  const _inRemix = REMIX_MODES.indexOf(mode) !== -1;
+  if (_inRemix) window._lastRemixMode = mode;
+  const _remixBar = document.getElementById('remixSubGroup');
+  if (_remixBar) _remixBar.style.display = _inRemix ? '' : 'none';
+  if (_inRemix) {
+    document.querySelectorAll('#remixSubGroup .pill-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.remix === mode));
+  }
   // Manual-tab Characters picker is T2V-only (Text-to-Video flow). Other
   // video modes (I2V, FFLF, Extend) have a different mental model — the
   // user is anchoring on a frame, not picking an actor.
@@ -22618,6 +24024,12 @@ function setMode(mode) {
   updateAccelAvailability();
   updateTemporalAvailability();
   updateDerived();
+  // Ingredients (multi-reference) — lazily wire the multi-image picker + load
+  // the recent-uploads strip on first entry. Idempotent (guarded by __wired).
+  if (mode === 'ingredients') {
+    if (typeof ingredientPickerWire === 'function') ingredientPickerWire();
+    if (typeof refreshIngredientRecent === 'function') refreshIngredientRecent();
+  }
   // Refresh the inline models card immediately — switching to FFLF when
   // Q8 is missing should surface the Download Q8 CTA without waiting for
   // the next 1.5s poll tick.
@@ -24588,6 +26000,24 @@ function audioStudioRenderSlots() {
   }
 }
 
+async function audioStudioEnhancePrompt() {
+  const ta = document.getElementById('audioStudioPrompt');
+  const original = ta.value.trim();
+  if (!original) { alert('Type a prompt before enhancing it.'); return; }
+  const btn = document.getElementById('audioStudioEnhanceBtn');
+  const originalLabel = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg class="ph" aria-hidden="true" style="margin-right:6px;vertical-align:-2px"><use href="#ph-sparkle-fill"/></svg>Loading Gemma\u2026 (~15s)';
+  try {
+    const r = await fetch('/prompt/enhance', { method: 'POST', body: new URLSearchParams({ prompt: original, mode: 't2v' }) });
+    const res = await r.json();
+    if (res.error) { alert('Enhance failed: ' + res.error); return; }
+    if (confirm('Original:\n' + res.original + '\n\nEnhanced:\n' + res.enhanced + '\n\nReplace your prompt with the enhanced version?'))
+      { ta.value = res.enhanced; ta.dispatchEvent(new Event('input', { bubbles: true })); }
+  } catch (e) { alert('Enhance request failed: ' + (e.message || e)); }
+  finally { btn.disabled = false; btn.innerHTML = originalLabel; }
+}
+
 async function audioStudioGenerate() {
   if (AUDIO_STUDIO.busy) return;
   const status = document.getElementById('audioStudioStatus');
@@ -24601,23 +26031,16 @@ async function audioStudioGenerate() {
     if (status) status.textContent = 'Prompt is required.';
     return;
   }
-  // Aspect → width/height map. Snapped to multiples of 32 so the latent
-  // grid is exact (LTX requires HW % 32 == 0; the panel checks this in
-  // make_job too but we pre-snap to keep the user's chosen ratio).
-  const aspect = (document.getElementById('audioStudioAspect').value || '16:9');
-  const aspectMap = {
-    '16:9': [1024, 576],
-    '9:16': [576, 1024],
-    '1:1':  [768, 768],
-    '4:3':  [832, 608],
-  };
-  const [w, h] = aspectMap[aspect] || aspectMap['16:9'];
-  // Duration → frames at 8k+1 cadence the model expects.
+  // Width / height from free-form inputs; snap to 32 px multiple
+  // (LTX latent grid requirement).
+  const w = Math.max(32, Math.round(parseInt(document.getElementById('audioStudioWidth').value || '1024', 10) / 32) * 32);
+  const h = Math.max(32, Math.round(parseInt(document.getElementById('audioStudioHeight').value || '576', 10) / 32) * 32);
+  // Duration from slider → frames at 8k+1 cadence the model expects.
   const dur = parseInt(document.getElementById('audioStudioDuration').value || '7', 10);
-  // 24 fps → frames per second; snap to nearest 8k+1.
   const targetFrames = Math.max(1, Math.round(dur * 24));
   const frames = ((targetFrames - 1 + 7) >> 3 << 3) + 1;  // round up to 8k+1
   const seed = parseInt(document.getElementById('audioStudioSeed').value || '-1', 10);
+  const audioConditioningScale = parseFloat(document.getElementById('audioConditioningScale').value || '1.0');
 
   AUDIO_STUDIO.busy = true;
   if (btn) btn.disabled = true;
@@ -24637,7 +26060,8 @@ async function audioStudioGenerate() {
     fd.set('height', String(h));
     fd.set('frames', String(frames));
     fd.set('seed', String(seed));
-    fd.set('quality', 'high');  // A2V is always Q8 dev-class
+    fd.set('audio_conditioning_scale', String(audioConditioningScale));
+    fd.set('quality', 'high');  // A2V is always pipeline-class (Q8 dev or Q4 distilled)
     // No accel, no enhance — A2V uses A2VidPipelineTwoStage's own walks.
     fd.set('accel', 'off');
     fd.set('enhance', 'off');
@@ -24686,33 +26110,35 @@ const TRAIN = {
   // card hides for style; guidance + labels swap). Mirrors the server-side
   // TRAIN_TYPES tuple in mlx_ltx_panel.py.
   trainType: 'character',
-  // Local mirror of the preset table; server has the authoritative copy in
-  // TRAIN_PRESETS but the JS-side estimator is instant — saves a /status
-  // round-trip per keystroke. Keep these in sync with TRAIN_PRESETS in py.
+  // Local mirror of the server preset table. BOOT carries the authoritative,
+  // hardware-adjusted version so 48 GB Macs see the compact training profile
+  // instead of the old 64 GB-class defaults. Static fallbacks below are only
+  // for damaged/old boot payloads.
   //
   // Schema change 2026-05-19: presets describe EPOCHS, not steps. Actual
   // step count is computed from `epochs × image_count` at the consumer
   // (trainComputeSteps below) so the same preset auto-scales with
   // dataset size. Advanced trainSteps override still wins.
-  presets: {
+  presets: BOOT.train_presets || {
     quick:  { epochs:  30, rank: 8,  resolution: 512, seconds_per_step: 1.5, ram_peak_gb: 12,
-              label: 'Quick',  subtitle: '~30 epochs · rank 8 · 512px' },
+              label: 'Quick',  subtitle: '~30 epochs · rank 8 · 512px', max_steps: 3000 },
     medium: { epochs:  60, rank: 16, resolution: 576, seconds_per_step: 2.2, ram_peak_gb: 18,
-              label: 'Medium', subtitle: '~60 epochs · rank 16 · 576px' },
+              label: 'Medium', subtitle: '~60 epochs · rank 16 · 576px', max_steps: 5000 },
     high:   { epochs: 100, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 28,
-              label: 'High',   subtitle: '~100 epochs · rank 32 · 512px (v2 recipe)' },
+              label: 'High',   subtitle: '~100 epochs · rank 32 · 512px (v2 recipe)', max_steps: 7000 },
   },
   // Mirror of the server-side TRAIN_STYLE_PRESETS. Style table differs from
   // character: quick uses rank 16 (not rank 8), and "high" adds epochs not
   // rank (rank 32 is the validated capacity ceiling for our LTX-2.3 stack).
-  stylePresets: {
+  stylePresets: BOOT.train_style_presets || {
     quick:  { epochs:  30, rank: 16, resolution: 512, seconds_per_step: 1.5, ram_peak_gb: 12,
-              label: 'Quick',  subtitle: '~30 epochs · rank 16 · 512px' },
+              label: 'Quick',  subtitle: '~30 epochs · rank 16 · 512px', max_steps: 3000 },
     medium: { epochs:  60, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 18,
-              label: 'Medium', subtitle: '~60 epochs · rank 32 · 512px' },
+              label: 'Medium', subtitle: '~60 epochs · rank 32 · 512px', max_steps: 5000 },
     high:   { epochs: 100, rank: 32, resolution: 512, seconds_per_step: 2.0, ram_peak_gb: 28,
-              label: 'High',   subtitle: '~100 epochs · rank 32 · 512px' },
+              label: 'High',   subtitle: '~100 epochs · rank 32 · 512px', max_steps: 7000 },
   },
+  trainProfile: BOOT.train_profile || {},
   // Voice (optional) state. `voiceFile` is the server-saved record once
   // an upload completes; `voiceEnabled` mirrors the toggle.
   //
@@ -24743,6 +26169,64 @@ const TRAIN = {
 // don't each have to know about both tables.
 function trainActivePresets() {
   return TRAIN.trainType === 'style' ? TRAIN.stylePresets : TRAIN.presets;
+}
+
+function trainActivePreset() {
+  const table = trainActivePresets();
+  return table[TRAIN.preset] || table.quick || {};
+}
+
+function trainUpdatePresetButtons() {
+  const table = trainActivePresets();
+  document.querySelectorAll('#trainPresetGroup .pill-btn').forEach((b) => {
+    const key = b.dataset.trainPreset;
+    b.classList.toggle('active', key === TRAIN.preset);
+  });
+  const subIds = {
+    quick: 'trainPresetQuickSub',
+    medium: 'trainPresetMediumSub',
+    high: 'trainPresetHighSub',
+  };
+  Object.keys(subIds).forEach((key) => {
+    const el = document.getElementById(subIds[key]);
+    const p = table[key];
+    if (el && p && p.subtitle) el.textContent = p.subtitle;
+  });
+}
+
+function trainDisableSelectAbove(selectId, maxValue) {
+  const sel = document.getElementById(selectId);
+  const max = Number(maxValue || 0);
+  if (!sel || !max) return;
+  Array.from(sel.options).forEach((opt) => {
+    if (!opt.value) {
+      opt.disabled = false;
+      return;
+    }
+    const n = Number(opt.value);
+    opt.disabled = Number.isFinite(n) && n > max;
+  });
+  const selected = Number(sel.value || 0);
+  if (selected && selected > max) sel.value = '';
+}
+
+function trainApplyAdvancedLimits() {
+  const preset = trainActivePreset();
+  const maxRank = Number(preset.max_rank || TRAIN.trainProfile.max_rank || 0);
+  const maxResolution = Number(preset.max_resolution || TRAIN.trainProfile.max_resolution || 0);
+  const maxSteps = Number(preset.max_steps || TRAIN.trainProfile.max_steps || 0);
+  if (maxRank) trainDisableSelectAbove('trainRank', maxRank);
+  if (maxResolution) trainDisableSelectAbove('trainResolution', maxResolution);
+  const stepsInput = document.getElementById('trainSteps');
+  if (stepsInput && maxSteps) {
+    stepsInput.max = String(maxSteps);
+    const current = Number(stepsInput.value || 0);
+    if (current && current > maxSteps) stepsInput.value = '';
+  }
+}
+
+function trainUpdateAdvancedFields() {
+  trainApplyAdvancedLimits();
 }
 
 // ============================================================================
@@ -24804,6 +26288,50 @@ const CHARACTERS_QUALITY = [
 const CHARACTERS_FRAMING_TEXT = Object.fromEntries(
   CHARACTERS_FRAMING.map(([v, , full]) => [v, full])
 );
+
+async function downloadSampleCharacter() {
+  // Class-based (not id) so the button can live in more than one empty state
+  // (the Character-mode strip AND the standalone Characters grid) and both
+  // update together.
+  const btns = Array.from(document.querySelectorAll('.js-get-sample-char'));
+  const statuses = Array.from(document.querySelectorAll('.js-get-sample-char-status'));
+  if (!btns.length) return;
+  const setStatus = (msg) => statuses.forEach(s => { s.hidden = false; s.textContent = msg; });
+  const setDisabled = (v) => btns.forEach(b => { b.disabled = v; });
+  setDisabled(true);
+  setStatus('Starting… (~817 MB, one-time)');
+  const finishOk = async (msg) => {
+    setStatus(msg);
+    // Re-init the picker(s) so the new character appears + the empty state hides.
+    try { if (typeof charactersInit === 'function') await charactersInit(); } catch (_) {}
+    try { if (typeof refreshManualCharacters === 'function') await refreshManualCharacters(); } catch (_) {}
+    setDisabled(false);
+  };
+  try {
+    const r = await fetch('/characters/download-sample', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (j && j.already) { await finishOk('Already installed — "Bizarro" is in your characters.'); return; }
+    if (!r.ok && r.status !== 202) { throw new Error((j && j.error) || ('HTTP ' + r.status)); }
+    const poll = setInterval(async () => {
+      let s;
+      try { s = await (await fetch('/characters/download-sample/status')).json(); }
+      catch (_) { return; }
+      if (s.status === 'downloading') {
+        setStatus('Downloading… ' + (s.mb || 0) + ' / ' + (s.total_mb || '?') + ' MB');
+      } else if (s.status === 'done' || s.present) {
+        clearInterval(poll);
+        await finishOk('Installed! "Bizarro" is in your characters now — pick it to start.');
+      } else if (s.status === 'error') {
+        clearInterval(poll);
+        setStatus('Download failed: ' + (s.error || 'unknown') + ' — try again.');
+        setDisabled(false);
+      }
+    }, 2500);
+  } catch (e) {
+    setStatus('Could not start: ' + (e.message || e));
+    setDisabled(false);
+  }
+}
 
 async function charactersInit() {
   // Idempotent. The grid is the default view; compose state only
@@ -25332,8 +26860,8 @@ async function charactersLoadParams(p) {
 // ============================================================================
 // TRAIN CHARACTER tab
 // ============================================================================
-const TRAIN_MIN = 15;
-const TRAIN_MAX = 50;
+const TRAIN_MIN = Number(BOOT.train_min_images || 15);
+const TRAIN_MAX = Number(BOOT.train_max_images || 50);
 
 function trainInit() {
   // Idempotent — safe to call on every setMode('train') without re-binding
@@ -25362,6 +26890,8 @@ function trainInit() {
       trainUpdateEstimate();
     });
   }
+  trainUpdatePresetButtons();
+  trainUpdateAdvancedFields();
   trainRefreshLoraList();
   trainUpdateEstimate();
   trainUpdateButtonState();
@@ -25623,6 +27153,7 @@ function trainWirePresetButtons() {
       TRAIN.preset = b.dataset.trainPreset;
       document.querySelectorAll('#trainPresetGroup .pill-btn').forEach(x =>
         x.classList.toggle('active', x === b));
+      trainUpdateAdvancedFields();
       trainUpdateEstimate();
     });
   });
@@ -25645,9 +27176,16 @@ function trainWireAdvancedFields() {
   ['trainRank', 'trainSteps', 'trainLR', 'trainResolution', 'trainCaptionStrategy']
     .forEach(id => {
       const el = document.getElementById(id);
-      if (el) el.addEventListener('change', trainUpdateEstimate);
-      if (el) el.addEventListener('input', trainUpdateEstimate);
+      if (el) el.addEventListener('change', () => {
+        trainApplyAdvancedLimits();
+        trainUpdateEstimate();
+      });
+      if (el) el.addEventListener('input', () => {
+        trainApplyAdvancedLimits();
+        trainUpdateEstimate();
+      });
     });
+  trainApplyAdvancedLimits();
 }
 
 async function trainUploadFiles(fileList) {
@@ -26051,20 +27589,27 @@ function trainEffectiveSteps() {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// Mirrors py-side _preset_steps_for(): steps = epochs × image_count.
+// Mirrors py-side _preset_steps_for(): steps = epochs × image_count, capped
+// by preset.max_steps when the active hardware profile supplies one.
 // Used by trainUpdateEstimate to keep the ETA chip honest as the user
 // drops more photos in. Floor of 1 image so n=0 doesn't yield zero
 // steps (matches server behavior).
 function trainComputeSteps(preset, imageCount) {
   const epochs = parseInt(preset.epochs, 10) || 0;
-  return Math.max(1, epochs * Math.max(1, imageCount | 0));
+  let steps = Math.max(1, epochs * Math.max(1, imageCount | 0));
+  const maxSteps = Number(preset.max_steps || 0);
+  if (maxSteps > 0) steps = Math.min(steps, maxSteps);
+  return steps;
 }
 
 function trainUpdateEstimate() {
-  const preset = (trainActivePresets()[TRAIN.preset]) || trainActivePresets().quick;
+  trainApplyAdvancedLimits();
+  const preset = trainActivePreset();
   const stepOverride = trainEffectiveSteps();
   const n = TRAIN.images.length;
-  const steps = stepOverride || trainComputeSteps(preset, n);
+  let steps = stepOverride || trainComputeSteps(preset, n);
+  const maxSteps = Number(preset.max_steps || TRAIN.trainProfile.max_steps || 0);
+  if (maxSteps > 0) steps = Math.min(steps, maxSteps);
   const sec = Math.round(3 * Math.max(0, n) + steps * preset.seconds_per_step + 30);
   // Estimate row is hidden until the user has dropped at least one
   // image. Before that, the row reads as missing data — not a useful
@@ -26074,7 +27619,12 @@ function trainUpdateEstimate() {
   const ramRow = document.getElementById('trainEstimateRam');
   const timeRow = document.getElementById('trainEstimateTime');
   const outRow = document.getElementById('trainEstimateOut');
-  if (timeRow && n > 0) timeRow.textContent = trainFmtDuration(sec) + ` · ${steps} steps`;
+  if (timeRow && n > 0) {
+    const profile = TRAIN.trainProfile && TRAIN.trainProfile.label
+      ? ` · ${TRAIN.trainProfile.label}`
+      : '';
+    timeRow.textContent = trainFmtDuration(sec) + ` · ${steps} steps${profile}`;
+  }
   if (ramRow) ramRow.textContent = `~${preset.ram_peak_gb} GB peak`;
   if (outRow) {
     const trig = (document.getElementById('trainTrigger').value || 'mrz07');
@@ -26567,6 +28117,9 @@ function setQuality(q) {
   if (typeof _applyHqSpeedRowVisibility === 'function') {
     try { _applyHqSpeedRowVisibility(); } catch (_) {}
   }
+  if (typeof _applyStgRowVisibility === 'function') {
+    try { _applyStgRowVisibility(); } catch (_) {}
+  }
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
 }
 function setAccel(a) {
@@ -26695,6 +28248,10 @@ function updatePromptPlaceholder() {
     prompt.placeholder = window._kfMode >= 3 ? keyframeMulti : keyframeTwo;
   } else if (currentMode === 'i2v') {
     prompt.placeholder = 'Describe how the reference image should move, plus sound cues. The image anchors frame 0; the prompt directs the full clip.';
+  } else if (currentMode === 'ingredients') {
+    prompt.placeholder = "Describe WHAT'S in the reference sheet — each character, prop, and the location. e.g. a friendly cartoon hedgehog with rounded chestnut fur; a green coiled garden hose; the bright interior of a 'Greenfield' garden store. (The Action field above describes the shot itself.)";
+  } else if (currentMode === 'control') {
+    prompt.placeholder = "Describe the NEW subject/scene to paint onto the control clip's motion and structure — plus sound cues. e.g. a red origami crane unfolding on a black table · soft paper rustle. The control video drives the composition; this prompt swaps what's in it.";
   } else {
     prompt.placeholder = base;
   }
@@ -26710,6 +28267,12 @@ document.querySelectorAll('#modeGroup .pill-btn').forEach(b => b.onclick = () =>
     const fallback = parseInt(document.getElementById('keyframe_count')?.value || '6', 10);
     setKeyframeMode(def === 'multi' ? fallback : parseInt(def, 10));
   }
+});
+// Remix sub-tool clicks set the REAL backend mode (ingredients/control/restore);
+// setMode keeps the parent Remix pill lit + this sub-pill active + the section
+// shown. Wired here alongside the #modeGroup handler so both rows behave alike.
+document.querySelectorAll('#remixSubGroup .pill-btn').forEach(b => b.onclick = () => {
+  setMode(b.dataset.remix);
 });
 document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.onclick = () => {
   // Disabled-but-actionable: the High pill becomes a "click to install Q8"
@@ -26941,6 +28504,21 @@ function updateDerived() {
   const inImageFlow = inI2V || currentMode === 'keyframe';
   document.getElementById('imageSection').classList.toggle('show', inI2V && currentMode !== 'keyframe');
   document.getElementById('extendSection').classList.toggle('show', currentMode === 'extend');
+  // Colorize (restore) shows its own source-video picker. Unlike Extend it
+  // KEEPS the sizing + quick-metrics rows below (the source's own dims/length
+  // drive the output, but the prompt + seed still apply).
+  const _restoreSection = document.getElementById('restoreSection');
+  if (_restoreSection) _restoreSection.classList.toggle('show', currentMode === 'restore');
+  // Ingredients (multi-reference) — its own multi-image picker + action field.
+  // Like Colorize it KEEPS the sizing/quick-metrics rows (frames apply; the
+  // sheet drives the rest).
+  const _ingredientsSection = document.getElementById('ingredientsSection');
+  if (_ingredientsSection) _ingredientsSection.classList.toggle('show', currentMode === 'ingredients');
+  // Control (Union) — its own control-video picker. Like Colorize it KEEPS the
+  // sizing/quick-metrics rows (the control clip drives dims/length; prompt +
+  // seed still apply).
+  const _controlSection = document.getElementById('controlSection');
+  if (_controlSection) _controlSection.classList.toggle('show', currentMode === 'control');
   document.getElementById('keyframeSection').classList.toggle('show', currentMode === 'keyframe');
   // Keyframe toggle row — visible only in keyframe mode
   const kfToggleRow = document.getElementById('kfToggleRow');
@@ -27075,9 +28653,9 @@ function pickerSetImage(key, path, opts = {}) {
     // FFLF anchors framing on the start frame; I2V anchors on its single
     // image. End frame doesn't drive aspect (would override the start
     // frame). a2v_image lives in the Audio→Video tab which has its own
-    // aspect dropdown (#audioStudioAspect) — calling snapAspectToImage
-    // would change the GLOBAL #aspect selector, not the A2V one, so
-    // skip it for a2v_image to avoid silently mutating an unrelated mode.
+    // width/height inputs — calling snapAspectToImage would change the
+    // GLOBAL #aspect selector, not the A2V one, so skip it for a2v_image
+    // to avoid silently mutating an unrelated mode.
     if ((key === 'image' || key === 'start_image') && opts.snapAspect !== false) {
       snapAspectToImage(path);
     }
@@ -27175,6 +28753,122 @@ async function refreshUploadsStrip() {
       img.addEventListener('click', () => pickerSetImage(key, img.dataset.path));
     });
   });
+}
+
+// ====== Ingredients (multi-reference) picker ======
+// Unlike the single-image pickers above, Ingredients holds an ORDERED LIST of
+// 2-8 server-side paths. The list is mirrored into the hidden
+// #ingredient_images_json input that make_job reads (and that's in the
+// allowlist — see the make_job params dict). Uploads go through the same
+// /upload endpoint; selecting from "Recent uploads" appends a path.
+let _ingredientPaths = [];   // array of server-side panel_uploads/* paths
+
+function _ingredientSync() {
+  const hidden = document.getElementById('ingredient_images_json');
+  if (hidden) hidden.value = JSON.stringify(_ingredientPaths);
+  _ingredientRenderThumbs();
+  // Keep the recent strip's "added" highlight in sync.
+  if (typeof refreshIngredientRecent === 'function') refreshIngredientRecent();
+}
+
+function _ingredientRenderThumbs() {
+  const wrap = document.getElementById('ingredients_thumbs');
+  if (!wrap) return;
+  if (!_ingredientPaths.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = _ingredientPaths.map((p, i) => `
+    <div class="ingredient-thumb" data-idx="${i}">
+      <img src="${escapeHtml(_thumbUrl('/image?path=' + encodeURIComponent(p), 160))}" alt="">
+      <button type="button" class="ingredient-thumb-x" data-idx="${i}" title="Remove"><svg class="ph" aria-hidden="true"><use href="#ph-x-bold"/></svg></button>
+      <span class="ingredient-thumb-n">${i + 1}</span>
+    </div>
+  `).join('');
+  wrap.querySelectorAll('.ingredient-thumb-x').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.idx, 10);
+      _ingredientPaths.splice(idx, 1);
+      _ingredientSync();
+    });
+  });
+}
+
+function ingredientAddPath(path) {
+  if (!path) return;
+  if (_ingredientPaths.includes(path)) return;   // no dupes
+  if (_ingredientPaths.length >= 8) { alert('Ingredients takes at most 8 images.'); return; }
+  _ingredientPaths.push(path);
+  _ingredientSync();
+}
+
+async function ingredientUploadFile(file) {
+  const drop = document.getElementById('ingredients_drop');
+  if (!file || !drop) return;
+  let busy = drop.querySelector('.picker-uploading');
+  if (!busy) {
+    busy = document.createElement('div');
+    busy.className = 'picker-uploading';
+    drop.appendChild(busy);
+  }
+  busy.textContent = `Uploading ${file.name}…`;
+  try {
+    const fd = new FormData(); fd.append('image', file);
+    const r = await fetch('/upload', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || 'upload failed');
+    ingredientAddPath(data.path);
+    if (typeof refreshUploadsStrip === 'function') refreshUploadsStrip();
+  } catch (e) {
+    alert(`Upload failed: ${e.message || e}`);
+  } finally {
+    busy.remove();
+  }
+}
+
+async function refreshIngredientRecent() {
+  const wrap = document.getElementById('ingredients_recent_wrap');
+  const strip = document.getElementById('ingredients_recent');
+  if (!wrap || !strip) return;
+  // Reuse the module-level uploads cache the single pickers already fill.
+  let list = _uploadsCache;
+  if (!list || !list.length) {
+    try { const d = await api('/uploads?limit=24'); list = (d && d.uploads) || []; _uploadsCache = list; }
+    catch (e) { list = []; }
+  }
+  if (!list.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = '';
+  strip.innerHTML = list.map(u => `
+    <img class="picker-recent-thumb${_ingredientPaths.includes(u.path) ? ' selected' : ''}"
+         src="${escapeHtml(_thumbUrl(u.url, 128))}"
+         data-path="${escapeHtml(u.path)}"
+         title="${escapeHtml(u.name)} · ${u.size_kb} KB"
+         alt="">
+  `).join('');
+  strip.querySelectorAll('img').forEach(img => {
+    img.addEventListener('click', () => ingredientAddPath(img.dataset.path));
+  });
+}
+
+function ingredientPickerWire() {
+  const drop = document.getElementById('ingredients_drop');
+  const file = document.getElementById('ingredients_file');
+  if (!drop || !file || drop.__wired) return;
+  drop.__wired = true;
+  drop.addEventListener('click', (e) => {
+    if (e.target.closest('.ingredient-thumb-x')) return;
+    file.click();
+  });
+  file.addEventListener('change', () => {
+    Array.from(file.files || []).forEach(f => ingredientUploadFile(f));
+    file.value = '';   // allow re-uploading the same file
+  });
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('dragover');
+    Array.from((e.dataTransfer && e.dataTransfer.files) || []).forEach(f => ingredientUploadFile(f));
+  });
+  _ingredientSync();
 }
 
 // ====== Format helpers ======
@@ -27923,8 +29617,15 @@ async function poll() {
     // .png as an Extend source (which would 400 server-side).
     const sel = document.getElementById('extendSrcSelect');
     const videoOutputs = currentOutputs.filter(o => !isPhotoOutputMain(o));
-    sel.innerHTML = '<option value="">— pick an output below or paste a path —</option>' +
+    const _videoOpts = '<option value="">— pick an output below or paste a path —</option>' +
       videoOutputs.slice(0, 40).map(o => `<option value="${escapeHtml(o.path)}">${escapeHtml(o.name)}</option>`).join('');
+    sel.innerHTML = _videoOpts;
+    // Colorize (restore) source dropdown — same video-only list as Extend.
+    const restoreSel = document.getElementById('restoreSrcSelect');
+    if (restoreSel) restoreSel.innerHTML = _videoOpts;
+    // Control (Union) control-video dropdown — same video-only list.
+    const controlSel = document.getElementById('controlSrcSelect');
+    if (controlSel) controlSel.innerHTML = _videoOpts;
   }
   // (The old "Hidden (N)" pill that lived here was retired with the
   // Visible/Hidden segmented control — the carousel-head comment above
@@ -29438,6 +31139,22 @@ document.getElementById('genForm').addEventListener('submit', async e => {
         fd.delete('keyframe_count');
       }
     }
+    // STG "detail guidance" — explicit fd.set so the value is unambiguous
+    // and so it only rides along when it can actually do something. STG acts
+    // only on the Q8 HQ path (quality=high); the Q4 distilled paths ignore it
+    // entirely (DistilledPipeline runs no guider). On any non-high quality we
+    // drop the field so a stale slider value can't reach the worker. The range
+    // input already carries name="stg_scale", but the FormData copy is
+    // post-processed here so this set() wins regardless of input order.
+    {
+      const _q = (fd.get('quality') || '').toString();
+      const _stgEl = document.getElementById('stgScale');
+      if (_q === 'high' && _stgEl) {
+        fd.set('stg_scale', _stgEl.value || '0');
+      } else {
+        fd.delete('stg_scale');
+      }
+    }
     await api('/queue/add','POST',fd);
   } finally {
     // Re-enable on the next event-loop tick so the button visibly
@@ -30518,6 +32235,62 @@ function setLoraStrength(path, strength) {
   _serializeLoras();
 }
 
+// --- Ingredients × Character picker -------------------------------------
+// Fills the optional character dropdown in Ingredients mode from the trained
+// characters in _knownUserLoras (kind=train_character). Selecting one stacks
+// the character LoRA on top of the Ingredients IC-LoRA server-side so the SAME
+// trained face lands in every composed scene. The character's trigger word
+// rides a hidden field; the server prepends it to the Action if missing.
+function populateIngredientCharLoras() {
+  const sel = document.getElementById('ingredient_char_lora');
+  const empty = document.getElementById('ingredientCharEmpty');
+  if (!sel) return;
+  const chars = (Array.isArray(_knownUserLoras) ? _knownUserLoras : [])
+    .filter(u => u && u.kind === 'train_character');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">None — compose from the reference images only</option>';
+  for (const c of chars) {
+    const o = document.createElement('option');
+    o.value = c.path;
+    const trig = (Array.isArray(c.trigger_words) && c.trigger_words[0]) || '';
+    o.dataset.trigger = trig;
+    o.textContent = (c.name || c.filename || c.path) + (trig ? ` · "${trig}"` : '');
+    sel.appendChild(o);
+  }
+  if (prev && chars.some(c => c.path === prev)) sel.value = prev;
+  sel.style.display = chars.length ? '' : 'none';
+  if (empty) empty.style.display = chars.length ? 'none' : '';
+  onIngredientCharChange();
+}
+
+function onIngredientCharChange() {
+  const sel = document.getElementById('ingredient_char_lora');
+  const tune = document.getElementById('ingredientCharTune');
+  const trigHint = document.getElementById('ingredientCharTrigHint');
+  const trigField = document.getElementById('ingredient_char_trigger');
+  if (!sel) return;
+  const opt = sel.options[sel.selectedIndex];
+  const trigger = (opt && opt.dataset.trigger) || '';
+  if (trigField) trigField.value = trigger;
+  const picked = !!sel.value;
+  if (tune) tune.style.display = picked ? '' : 'none';
+  if (trigHint) {
+    trigHint.innerHTML = picked
+      ? (trigger
+          ? 'Trigger word <code>' + escapeHtml(trigger) + '</code> is added to your Action automatically so the character fires.'
+          : 'No trigger word recorded for this character — it may still fire from the LoRA alone.')
+      : '';
+  }
+}
+
+function onIngredientCharStrength(v) {
+  const lab = document.getElementById('ingCharStrLabel');
+  const field = document.getElementById('ingredient_char_strength');
+  const f = parseFloat(v);
+  if (lab) lab.textContent = (isNaN(f) ? 1.8 : f).toFixed(1);
+  if (field) field.value = String(v);
+}
+
 async function refreshLoras() {
   // Pull the FULL library (no mode filter) so _knownUserLoras keeps every
   // entry — that lets refreshLoras() also serve as the "deleted on disk"
@@ -30566,6 +32339,10 @@ async function refreshLoras() {
     knownPaths.has(l.path) || l.path.includes('/'));   // keep HF ids (no dir slash)
   renderLorasList();
   _serializeLoras();
+  // Refill the Ingredients-mode character dropdown from the same library
+  // (kind=train_character). Runs here so a newly-trained character appears
+  // the moment /loras is re-fetched after training.
+  try { populateIngredientCharLoras(); } catch (_) {}
 }
 
 function renderLorasList() {
@@ -31385,6 +33162,10 @@ function selectManualCharacter(id) {
 // based on whether a character is currently selected. Idempotent — safe
 // to call any time the selection state changes.
 function _applyCharacterQualityStripVisibility() {
+  // Q4 tier keeps the regular quality pills (Quick/Balanced/Standard) —
+  // no Q8-only character quality strip. The character LoRA fuses into
+  // the Q4 distilled base; identity match is imperfect but it renders.
+  if (window.PHOSPHENE_CAP_TIER === 'q4') return;
   const def  = document.getElementById('qualityGroup');
   const char = document.getElementById('qualityGroupCharacter');
   const skipWrap = document.getElementById('charSkipstepToggleWrap');
@@ -31467,9 +33248,12 @@ function _setCharacterQuality(btn) {
   if (typeof updateCustomizeSummary === 'function') {
     try { updateCustomizeSummary(); } catch (_) {}
   }
-  // Quality is now 'high'; reveal the HQ-speed row.
+  // Quality is now 'high'; reveal the HQ-speed row + STG slider.
   if (typeof _applyHqSpeedRowVisibility === 'function') {
     try { _applyHqSpeedRowVisibility(); } catch (_) {}
+  }
+  if (typeof _applyStgRowVisibility === 'function') {
+    try { _applyStgRowVisibility(); } catch (_) {}
   }
 }
 
@@ -31524,6 +33308,20 @@ function _wireHqSpeedPills() {
 // optimization).
 function _applyHqSpeedRowVisibility() {
   const row = document.getElementById('hqSpeedRow');
+  if (!row) return;
+  const q = document.getElementById('quality')?.value || '';
+  row.hidden = (q !== 'high');
+}
+
+// Show the STG "detail guidance" slider only when quality=high (Q8 HQ).
+// STG is a no-op on the Q4 distilled paths, so there's nothing to expose
+// for Quick/Standard/Balanced. Hiding the row does NOT reset stg_scale —
+// the slider's own value persists; the make_job clamp + the helper's
+// stg_scale>0 gate mean a stale non-zero value can't engage on a Q4 render
+// anyway (the Q4 dispatch never reads stg_scale). Mirror of
+// _applyHqSpeedRowVisibility so the two HQ-only rows reveal together.
+function _applyStgRowVisibility() {
+  const row = document.getElementById('stgRow');
   if (!row) return;
   const q = document.getElementById('quality')?.value || '';
   row.hidden = (q !== 'high');
@@ -31968,9 +33766,12 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof _applyCharacterQualityStripVisibility === 'function') {
     try { _applyCharacterQualityStripVisibility(); } catch (e) {}
   }
-  // Apply correct HQ-speed-row visibility based on initial quality.
+  // Apply correct HQ-speed-row + STG-slider visibility based on initial quality.
   if (typeof _applyHqSpeedRowVisibility === 'function') {
     try { _applyHqSpeedRowVisibility(); } catch (e) {}
+  }
+  if (typeof _applyStgRowVisibility === 'function') {
+    try { _applyStgRowVisibility(); } catch (e) {}
   }
 });
 
@@ -32475,12 +34276,7 @@ function workflowSwitch(name) {
   // chip strip is integrated into Manual (T2V). If we get a stale
   // 'characters' value from localStorage, snap to 'manual'.
   if (name === 'characters') name = 'manual';
-  // Q4 cap-tier doesn't ship the audio workflow. If 'audio' is requested
-  // anyway (stale localStorage, Load Params on a historical A2V job,
-  // scripted caller), snap to 'manual' before any pane logic runs.
-  if (name === 'audio' && document.body.dataset.capTier === 'q4') {
-    name = 'manual';
-  }
+  // Q4 tier uses the distilled A2V pipeline (no Q8 dev required).
   document.querySelectorAll('#workflowTabs button[data-workflow]')
     .forEach(b => b.classList.toggle('active', b.dataset.workflow === name));
   const manual = document.getElementById('genForm');
