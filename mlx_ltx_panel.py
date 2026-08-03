@@ -3916,6 +3916,10 @@ STATE: dict = {
     "queue": [], "current": None, "history": [],
     "paused": False, "log": [],
     "running": False, "pid": None, "pgid": None,
+    # Process group of an in-flight Hailuo H3 render (the optional second
+    # video engine — a `caffeinate → python → ffmpeg` tree outside HELPER).
+    # /stop and the atexit hook kill it by pgid, same contract as train_pgid.
+    "h3_pgid": None,
 }
 LOCK = threading.RLock()
 QUEUE_COND = threading.Condition(LOCK)
@@ -4332,6 +4336,228 @@ def _select_generation_profile(total_ram_gb: float, tier_key: str) -> dict:
 
 
 GENERATION_PROFILE = _select_generation_profile(SYSTEM_RAM_GB, SYSTEM_TIER)
+
+
+# ---- Hailuo H3 — the optional SECOND video engine ----------------------------
+#
+# MiniMax-H3 (FL2VA) renders joint video + audio from one prompt. It is NOT
+# part of the LTX warm-helper pipeline and never touches it: H3 ships as an
+# optional pack — a sibling checkout of mrbizarro/minimax-h3-mlx with its OWN
+# venv — and runs exactly like the mflux image engines already do: spawn a CLI,
+# stream its stdout into push(), read its metrics JSON when it exits.
+#
+# Why a subprocess and not a helper action:
+#   * H3's staged runner materializes ONE large component at a time (Q8 text
+#     encoder → free → bf16 pruned DiT → free → the two VAEs). Peak ~40 GiB.
+#     The LTX warm helper holds its own weights resident. Both at once does not
+#     fit on a 64 GB Mac, so run_h3_job_inner() KILLS the warm helper first
+#     (it respawns lazily on the next LTX job — existing behaviour).
+#   * It keeps a second engine's dependency tree (mlx-vlm, transformers,
+#     pillow) out of the ltx-2-mlx venv, so an H3 install can never break LTX.
+#
+# Layout (both supported — see _h3_model_roots):
+#   <H3_ROOT>/scripts/generate_staged.py     the validated CLI
+#   <H3_ROOT>/.venv/bin/python               its own interpreter
+#   <H3_MODELS>/deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors
+#   <H3_MODELS>/ddalcu-q8/{text_encoder,video_vae,audio_vae}.safetensors + cfg
+#   <H3_MODELS>/upstream-meta/FL2VA/text_encoder/config.json
+#
+# Both roots are env-overridable so a dev box can point at an existing 75 GB
+# checkout instead of duplicating it under the Pinokio install:
+#   LTX_H3_ROOT=/path/to/minimax-h3-mlx  LTX_H3_MODELS=/path/to/models
+# See docs/H3_ENGINE.md.
+H3_ROOT = Path(os.environ.get("LTX_H3_ROOT", str(ROOT / "minimax-h3-mlx")))
+H3_MODELS = Path(os.environ.get("LTX_H3_MODELS", str(ROOT / "mlx_models" / "hailuo-h3")))
+# 64 GB machines report ~63.x GiB after firmware reservations, so the floor is
+# 60, not 64. Below this the staged runner swaps and a 3 s clip takes hours.
+H3_MIN_RAM_GB = 60.0
+H3_DIT_FILENAME = "MiniMax-H3-FL2VA-pruned_bf16.safetensors"
+H3_COMPACT_FILES = ("text_encoder.safetensors", "video_vae.safetensors",
+                    "audio_vae.safetensors")
+H3_TEXT_CONFIG_REL = ("FL2VA", "text_encoder", "config.json")
+# H3 runs at 24 fps like LTX, on a 17n+5 frame grid (the runner snaps up).
+H3_FPS = 24.0
+
+# Quality tiers for H3. These are DATA, not magic numbers — every value below
+# was measured on a 64 GB M4 Max (see the metrics JSONs in the H3 campaign):
+#
+#   steps = SIGMA POINTS; the runner does points-1 forwards. 9 points = 8
+#   forwards, which a matched-cost A/B showed is visually free at or below
+#   ~13k packed rows (640×384/73f = 6.4k rows, 768×448/124f = 13.7k rows).
+#   The 10 s tier is NOT the same regime: 768×448/243f is ~25k packed rows and
+#   8 forwards ghosts there, so it needs 16 points / 15 forwards — which is why
+#   it costs ~36 min and is flagged as a batch-it-and-walk-away render.
+#
+# Height/width must be multiples of 32 (runner errors otherwise). Frames land
+# on the 17n+5 grid: 73 = 3.0 s, 124 → snaps to 124 (5.1 s), 243 → 10.1 s.
+H3_TIERS: dict[str, dict] = {
+    "draft_3s": {
+        "key": "draft_3s", "label": "Draft · 3s",
+        "width": 640, "height": 384, "frames": 73, "steps": 9,
+        "spec": "640×384 · 73f", "eta": "~3 min",
+        "blurb": "Fastest look-see. Good enough to judge motion + dialogue timing.",
+    },
+    "hq_3s": {
+        "key": "hq_3s", "label": "HQ · 3s",
+        "width": 768, "height": 448, "frames": 73, "steps": 9,
+        "spec": "768×448 · 73f", "eta": "~4-5 min",
+        "blurb": "Same length as Draft at the delivery resolution.",
+    },
+    "hq_5s": {
+        "key": "hq_5s", "label": "HQ · 5s",
+        "width": 768, "height": 448, "frames": 124, "steps": 9,
+        "spec": "768×448 · 124f", "eta": "~8 min",
+        "blurb": "The workhorse: a full 5 s beat with synced dialogue.",
+    },
+    "long_10s": {
+        "key": "long_10s", "label": "Long · 10s",
+        "width": 768, "height": 448, "frames": 243, "steps": 16,
+        "spec": "768×448 · 243f", "eta": "~36 min · batch",
+        "blurb": "Needs 15 forwards — 8 ghosts at this row count. Queue it and walk away.",
+    },
+}
+H3_TIER_DEFAULT = "draft_3s"
+# Modes H3 can serve. Text = prompt only; Image = FL2VA first-frame
+# conditioning. Everything else (FFLF, Extend, Remix, Character, A2V) is
+# LTX-pipeline-specific and has no H3 equivalent.
+H3_MODES = ("t2v", "i2v")
+
+
+def _h3_model_roots() -> list[Path]:
+    """Candidate roots for the three H3 weight components.
+
+    Two layouts are supported and both carry the SAME three component dirs:
+      <H3_MODELS>/{deepbeep-pruned-bf16,ddalcu-q8,upstream-meta}
+          the canonical shape (what the campaign tree uses, and what
+          install_h3.js reproduces under mlx_models/hailuo-h3/)
+      <H3_MODELS>/models/{...}
+          what the upstream `scripts/download_selected.py --root X` writes,
+          since it appends `models/` to the root it is given.
+    Ordered, cheap, deterministic — no globbing over a HF cache.
+    """
+    return [H3_MODELS, H3_MODELS / "models"]
+
+
+def _h3_python() -> Path | None:
+    """Interpreter for the H3 pack. LTX_H3_PYTHON overrides (dev boxes that
+    keep the venv in a sibling checkout); otherwise the pack's own .venv."""
+    override = os.environ.get("LTX_H3_PYTHON", "").strip()
+    if override:
+        p = Path(override)
+        return p if p.exists() else None
+    for cand in (H3_ROOT / ".venv" / "bin" / "python3.11",
+                 H3_ROOT / ".venv" / "bin" / "python"):
+        if cand.exists():
+            return cand
+    return None
+
+
+def h3_paths() -> dict:
+    """Resolve every H3 component. Never raises — reports what's missing so
+    the UI can render an honest install card instead of a stack trace."""
+    runner = H3_ROOT / "scripts" / "generate_staged.py"
+    python = _h3_python()
+    dit = compact_root = text_config = models_root = None
+    for root in _h3_model_roots():
+        cand_dit = root / "deepbeep-pruned-bf16" / H3_DIT_FILENAME
+        if not cand_dit.is_file():
+            continue
+        models_root = root
+        dit = cand_dit
+        cand_compact = root / "ddalcu-q8"
+        if all((cand_compact / f).is_file() for f in H3_COMPACT_FILES):
+            compact_root = cand_compact
+        cand_cfg = root.joinpath("upstream-meta", *H3_TEXT_CONFIG_REL)
+        if cand_cfg.is_file():
+            text_config = cand_cfg
+        break
+    missing: list[str] = []
+    if not runner.is_file():
+        missing.append(f"runner {runner}")
+    if python is None:
+        missing.append(f"venv python under {H3_ROOT / '.venv'}")
+    if dit is None:
+        missing.append(f"pruned bf16 DiT ({H3_DIT_FILENAME})")
+    if compact_root is None:
+        missing.append("Q8 components (text_encoder / video_vae / audio_vae)")
+    if text_config is None:
+        missing.append("upstream text_encoder config.json")
+    return {
+        "root": str(H3_ROOT),
+        "models": str(H3_MODELS),
+        "models_root": str(models_root) if models_root else None,
+        "runner": runner,
+        "python": python,
+        "dit": dit,
+        "compact_root": compact_root,
+        "text_config": text_config,
+        "missing": missing,
+    }
+
+
+def h3_available() -> bool:
+    """True when the runner, its venv and all three weight components exist."""
+    return not h3_paths()["missing"]
+
+
+def h3_capable() -> bool:
+    """True when this Mac has the unified memory H3 needs (~40 GiB peak).
+
+    Reuses the same `hw.memsize` reading the capability tiers are built on
+    (SYSTEM_RAM_GB). LTX_H3_FORCE_CAPABLE=1 is a test override only — it does
+    not make a 32 GB Mac able to render, it just stops the UI hiding the pill.
+    """
+    if os.environ.get("LTX_H3_FORCE_CAPABLE", "").strip() in ("1", "true", "yes"):
+        return True
+    return SYSTEM_RAM_GB >= H3_MIN_RAM_GB
+
+
+_H3_FF_CACHE: dict[str, bool] = {}
+
+
+def h3_supports_first_frame() -> bool:
+    """Whether the INSTALLED runner accepts `--first-frame` (FL2VA image
+    conditioning). The flag landed after the first public branch, so an older
+    checkout renders Text fine but would die with an argparse error on Image.
+    Probed from the script source (cheap, no subprocess) and cached per mtime.
+    """
+    runner = H3_ROOT / "scripts" / "generate_staged.py"
+    try:
+        key = f"{runner}:{runner.stat().st_mtime_ns}"
+    except OSError:
+        return False
+    if key in _H3_FF_CACHE:
+        return _H3_FF_CACHE[key]
+    try:
+        supported = "--first-frame" in runner.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        supported = False
+    _H3_FF_CACHE.clear()
+    _H3_FF_CACHE[key] = supported
+    return supported
+
+
+def h3_status() -> dict:
+    """Compact H3 snapshot for /status + the page bootstrap."""
+    paths = h3_paths()
+    capable = h3_capable()
+    available = not paths["missing"]
+    return {
+        "capable": capable,
+        "available": available,
+        "installed": available,
+        "first_frame": available and h3_supports_first_frame(),
+        "min_ram_gb": H3_MIN_RAM_GB,
+        "ram_gb": round(SYSTEM_RAM_GB, 1),
+        "root": paths["root"],
+        "models": paths["models"],
+        "missing": paths["missing"],
+        "tiers": list(H3_TIERS.values()),
+        "default_tier": H3_TIER_DEFAULT,
+        "modes": list(H3_MODES),
+        "size_note": "~75 GB · needs 64 GB unified memory · "
+                     "MiniMax Community License (territory restrictions apply)",
+    }
 
 
 def _scale_dims_to_max(width: int, height: int, max_dim: int,
@@ -5516,6 +5742,22 @@ def _kill_train_proc() -> None:
         pass
 
 
+def _kill_h3_proc() -> None:
+    """Atexit hook — SIGTERM a running Hailuo H3 render by its pgid, so
+    quitting Pinokio doesn't leave a 40 GiB MLX process behind. Mirrors
+    _kill_train_proc."""
+    try:
+        pgid = STATE.get("h3_pgid")
+    except Exception:      # noqa: BLE001
+        pgid = None
+    if not pgid:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        pass
+
+
 def _kill_image_procs() -> None:
     """Atexit hook — SIGTERM any in-flight image-engine subprocesses
     (HiDream BF16 helper, mflux per-family binaries). Each engine registers
@@ -5529,6 +5771,7 @@ def _kill_image_procs() -> None:
 
 
 atexit.register(_kill_train_proc)
+atexit.register(_kill_h3_proc)
 atexit.register(_kill_image_procs)
 
 
@@ -5668,6 +5911,7 @@ def stop_current_job(timeout: float = 5.0) -> None:
         cur = STATE["current"]
         mux_pgid = STATE.get("mux_pgid")
         train_pgid = STATE.get("train_pgid")
+        h3_pgid = STATE.get("h3_pgid")
     if cur is not None:
         cur["cancel_requested"] = True
     push("Stop requested — killing helper + ffmpeg post-process + training subprocess to abort current job.")
@@ -5691,6 +5935,30 @@ def stop_current_job(timeout: float = 5.0) -> None:
             push(f"SIGTERM sent to mux pgid {mux_pgid}")
         except ProcessLookupError:
             pass
+    # Hailuo H3 renders live entirely outside HELPER — a `caffeinate → python →
+    # ffmpeg` tree in its own process group. Without this, /stop left a 40 GiB
+    # MLX process running and the worker moved on to the next job on a machine
+    # that no longer had the memory for it.
+    if h3_pgid:
+        try:
+            os.killpg(h3_pgid, signal.SIGTERM)
+            push(f"SIGTERM sent to H3 pgid {h3_pgid}")
+        except ProcessLookupError:
+            pass
+        else:
+            # Same escape hatch the trainer gets: MLX can sit inside a Metal
+            # kernel past SIGTERM. Fire-and-forget so /stop returns now.
+            def _force_kill_h3(grace: float, pgid: int) -> None:
+                time.sleep(grace)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                    push(f"SIGKILL sent to H3 pgid {pgid} (no SIGTERM ack)")
+                except ProcessLookupError:
+                    pass
+            threading.Thread(
+                target=_force_kill_h3, args=(8.0, h3_pgid),
+                daemon=True, name=f"sigkill-h3-{h3_pgid}",
+            ).start()
     # Training subprocess (lora_lab.train_character + lora_lab.train_audio)
     # lives in its own session/pgid (start_new_session=True on both
     # Popens). Without this, /stop only killed HELPER + mux ffmpeg and the
@@ -6127,6 +6395,29 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     else:
         _frames_default = "121"
 
+    # ---- Engine selection (LTX warm helper vs the optional Hailuo H3 pack) --
+    # Resolved BEFORE the params dict so the H3 tier can overwrite
+    # width/height/frames/steps below. Every gate here is server-side on
+    # purpose: a stale browser tab, a Load-Params replay of an old sidecar, or
+    # a direct curl to /queue/add must never reach the worker with an engine
+    # this Mac (or this mode) can't actually run.
+    _engine = (f("engine", "ltx") or "ltx").strip().lower()
+    if _engine not in ("ltx", "h3"):
+        _engine = "ltx"
+    _h3_tier = (f("h3_tier", H3_TIER_DEFAULT) or H3_TIER_DEFAULT).strip().lower()
+    if _h3_tier not in H3_TIERS:
+        _h3_tier = H3_TIER_DEFAULT
+    if _engine == "h3":
+        if mode_in not in H3_MODES:
+            push(f"engine=h3 requested for mode={mode_in!r} — Hailuo H3 only "
+                 f"serves {', '.join(H3_MODES)}; falling back to LTX.")
+            _engine = "ltx"
+        elif not h3_capable():
+            push(f"engine=h3 requested but this Mac reports "
+                 f"{SYSTEM_RAM_GB:.0f} GB unified memory (needs "
+                 f"{H3_MIN_RAM_GB:.0f}+) — falling back to LTX.")
+            _engine = "ltx"
+
     job = {
         "id": _new_job_id(),
         "status": "queued",
@@ -6137,6 +6428,14 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         "elapsed_sec": None,
         "params": {
             "mode": f("mode", "t2v"),
+            # Which video engine renders this job: "ltx" (the warm-helper
+            # pipeline, default and unchanged) or "h3" (the optional Hailuo H3
+            # subprocess pack). run_job_inner dispatches on this BEFORE any
+            # LTX-only validation. Both keys MUST live in this allowlist or
+            # they silently no-op on /queue/add — the known make_job trap
+            # (see CLAUDE.md and the restore/ingredients/control notes below).
+            "engine": _engine,
+            "h3_tier": _h3_tier,
             "prompt": prompt,
             "negative_prompt": f("negative_prompt", ""),
             "width": max(32, int(f("width", str(default_w)) or default_w)),
@@ -6258,6 +6557,24 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         "output_path": None,
         "error": None,
     }
+    # H3 geometry is TIER-DEFINED, not user-typed. The tier table is the single
+    # source of truth for width/height/frames/steps (see H3_TIERS for why each
+    # number is what it is), so stamp it over whatever the form carried. This
+    # also makes the queue card show the real geometry before the job starts,
+    # and keeps a stale tab from posting an LTX 8k+1 frame count (121) into a
+    # runner that snaps frames to the 17n+5 grid.
+    if _engine == "h3":
+        _tier_cfg = H3_TIERS[_h3_tier]
+        job["params"]["width"] = _tier_cfg["width"]
+        job["params"]["height"] = _tier_cfg["height"]
+        job["params"]["frames"] = _tier_cfg["frames"]
+        job["params"]["steps"] = _tier_cfg["steps"]
+        # LTX-only post-processing has no meaning for an H3 render: the runner
+        # writes its own muxed mp4 at native size. Neutralise them so the
+        # sidecar (and the ⓘ modal) don't claim an upscale that never ran.
+        job["params"]["upscale"] = "off"
+        job["params"]["temporal_mode"] = "native"
+        job["params"]["accel"] = "off"
     # STG (Spatio-Temporal Guidance) — "detail guidance" slider. Only stamp
     # `stg_scale` onto params when the form actually sent a value, so each
     # dispatch keeps its OWN default when the user didn't touch the slider:
@@ -7411,6 +7728,290 @@ def run_train_job_inner(job: dict) -> None:
     push(f"[train.audio] done: {audio_lora_path} (elapsed {audio_elapsed}s)")
 
 
+def run_h3_job_inner(job: dict) -> None:
+    """Render one job on the Hailuo H3 engine (optional subprocess pack).
+
+    Shape mirrors run_train_job_inner: build an argv, spawn it in its OWN
+    process group so /stop can kill the whole tree, stream stdout into push(),
+    then write the same `<output>.mp4.json` sidecar every LTX render writes so
+    the gallery, the ⓘ modal and Load Params all work with no gallery changes.
+
+    The ONE thing this does that no other job does: it kills the LTX warm
+    helper first. H3's staged runner peaks around 40 GiB and the helper holds
+    its own weights resident — both at once does not fit on a 64 GB Mac. The
+    helper respawns lazily on the next LTX job (WarmHelper._ensure), so this
+    costs one cold start and nothing else.
+    """
+    p = job["params"]
+    mode = (p.get("mode") or "t2v").strip().lower()
+    paths = h3_paths()
+
+    # ---- gates ----------------------------------------------------------
+    if not h3_capable():
+        raise RuntimeError(
+            f"Hailuo H3 needs about 64 GB of unified memory; this Mac reports "
+            f"{SYSTEM_RAM_GB:.0f} GB. Render on the LTX engine instead.")
+    if paths["missing"]:
+        raise RuntimeError(
+            "The Hailuo H3 pack isn't installed — missing: "
+            + "; ".join(paths["missing"])
+            + ". Install it from the Phosphene sidebar in Pinokio "
+              "('Install Hailuo H3'), or point LTX_H3_ROOT / LTX_H3_MODELS at "
+              "an existing checkout.")
+    if mode not in H3_MODES:
+        raise RuntimeError(
+            f"Hailuo H3 doesn't serve mode {mode!r} — only "
+            f"{', '.join(H3_MODES)}. Switch the engine back to LTX.")
+
+    tier_key = (p.get("h3_tier") or H3_TIER_DEFAULT).strip().lower()
+    tier = H3_TIERS.get(tier_key) or H3_TIERS[H3_TIER_DEFAULT]
+    width = int(p.get("width") or tier["width"])
+    height = int(p.get("height") or tier["height"])
+    frames = int(p.get("frames") or tier["frames"])
+    steps = int(p.get("steps") or tier["steps"])
+    prompt = (p.get("prompt") or "").strip()
+    if not prompt:
+        raise RuntimeError("H3 needs a prompt — dialogue and sound are "
+                           "generated jointly from it.")
+
+    # First-frame conditioning (Image mode). The flag landed on the runner
+    # after the first public branch, so probe the INSTALLED script rather than
+    # assuming; an older pack renders Text fine and must fail here with a
+    # readable message instead of an argparse error 30 s in.
+    first_frame: Path | None = None
+    if mode == "i2v":
+        src = (p.get("image") or "").strip()
+        if not src or not Path(src).exists():
+            raise RuntimeError(
+                "Image mode on H3 needs a reference image — pick one, or "
+                "switch to Text mode.")
+        if not h3_supports_first_frame():
+            raise RuntimeError(
+                "This Hailuo H3 checkout has no `--first-frame` support "
+                f"({paths['runner']}). Update the H3 pack, or use Text mode.")
+        first_frame = Path(src)
+
+    # Seed: the panel keeps "-1" = random. H3's runner has no random mode, so
+    # resolve it here and record what we used (matches the LTX seed_used
+    # contract the ⓘ modal + Load Params already read).
+    try:
+        seed = int(str(p.get("seed", "-1") or "-1").strip())
+    except (TypeError, ValueError):
+        seed = -1
+    if seed < 0:
+        seed = random.randint(0, 2**31 - 1)
+    p["seed_used"] = seed
+
+    out_path = _unique_output_path(
+        OUTPUT,
+        _descriptive_filename(p.get("label") or "", prompt, fallback="h3") + "_h3",
+    )
+    metrics_dir = STATE_DIR / "h3_metrics"
+    metrics_path = metrics_dir / f"{job['id']}.json"
+    try:
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    job["raw_path"] = str(out_path)
+
+    # ---- memory safety: the warm helper cannot coexist with H3 -----------
+    if HELPER.is_alive():
+        push("[h3] stopping the LTX warm helper — H3 peaks around 40 GiB and "
+             "the two engines can't both be resident. It restarts by itself on "
+             "your next LTX render.")
+        HELPER.kill()
+
+    cmd = [
+        # caffeinate keeps the Mac awake for the whole render; being the
+        # process-group leader means /stop's killpg takes both down together.
+        "caffeinate", "-i",
+        str(paths["python"]), str(paths["runner"]),
+        prompt,
+        "--dit", str(paths["dit"]),
+        "--compact-root", str(paths["compact_root"]),
+        "--text-config", str(paths["text_config"]),
+        "-o", str(out_path),
+        "--metrics", str(metrics_path),
+        "--frames", str(frames),
+        "--height", str(height),
+        "--width", str(width),
+        "--steps", str(steps),
+        "--seed", str(seed),
+    ]
+    if first_frame is not None:
+        cmd += ["--first-frame", str(first_frame)]
+
+    env = os.environ.copy()
+    # The runner pipes raw RGB into `ffmpeg` from PATH (minimax_h3_mlx.media);
+    # Pinokio's bundled binary is not on the default PATH.
+    env["PATH"] = f"{FFMPEG_BIN}:{env.get('PATH', '')}"
+    env["PYTHONUNBUFFERED"] = "1"
+
+    push(f"[h3] {tier['label']} · {width}×{height} · {frames}f · "
+         f"{steps} sigma points ({steps - 1} forwards) · seed {seed}"
+         + (f" · first frame {first_frame.name}" if first_frame else ""))
+    push("[h3] $ " + " ".join(shlex.quote(c) for c in cmd))
+
+    t0 = time.time()
+    # Denoise clock, started when the runner enters `joint_denoise`. The ETA
+    # has to be per-DENOISE-step, not per-wall-second: the staged loads
+    # (text encoder + 41 GB DiT) eat ~45 s up front, so dividing total elapsed
+    # by completed steps reads ~2x high at step 1 and then visibly "falls",
+    # which looks like a broken estimate.
+    denoise_t0: float | None = None
+    proc: subprocess.Popen | None = None
+    step_rx = re.compile(r"^step (\d+)/(\d+):")
+    phase_rx = re.compile(r"^== (.+) ==$")
+    phase_label = "Loading H3 text encoder"
+    last_step, total_steps = 0, max(1, steps - 1)
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(H3_ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            # Own process group so /stop can take down caffeinate + python +
+            # the ffmpeg it pipes into with one killpg.
+            start_new_session=True,
+        )
+        with LOCK:
+            STATE["pid"] = proc.pid
+            STATE["h3_pgid"] = os.getpgid(proc.pid)
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            if not line.strip():
+                continue
+            push(f"[h3] {line}")
+            m_phase = phase_rx.match(line.strip())
+            if m_phase:
+                phase_label = {
+                    "text_encode_q8": "Encoding prompt (Q8 text encoder)",
+                    "text_cache_load": "Loading cached prompt embedding",
+                    "keyframe_encode": "Encoding first frame",
+                    "dit_load_bf16": "Loading H3 transformer (bf16)",
+                    "adaln_cache_and_noise": "Building AdaLN cache",
+                    "joint_denoise": "Denoising video + audio",
+                    "video_vae_decode": "Decoding video",
+                    "audio_vae_decode": "Decoding audio",
+                    "encode_mux": "Encoding mp4",
+                }.get(m_phase.group(1).strip(), m_phase.group(1).strip())
+                if m_phase.group(1).strip() == "joint_denoise":
+                    denoise_t0 = time.time()
+            m_step = step_rx.match(line.strip())
+            if m_step:
+                try:
+                    last_step = int(m_step.group(1))
+                    total_steps = max(1, int(m_step.group(2)))
+                except (TypeError, ValueError):
+                    pass
+            elapsed = time.time() - t0
+            # Denoise dominates wall time; give it the 5–92% band so the bar
+            # doesn't sit at 0 through a 30 s model load and then jump.
+            if last_step:
+                pct = 5.0 + 87.0 * (last_step / float(total_steps))
+                spent = elapsed if denoise_t0 is None else max(0.0, time.time() - denoise_t0)
+                per_step = spent / max(1, last_step)
+                eta = max(0.0, (total_steps - last_step) * per_step)
+                label = f"{phase_label} · step {last_step} / {total_steps}"
+            else:
+                pct, eta = 3.0, 0.0
+                label = phase_label
+            with LOCK:
+                cur = STATE.get("current")
+                if cur and cur.get("id") == job["id"]:
+                    cur["progress"] = {
+                        "phase": "denoise" if last_step else "load",
+                        "phase_label": label,
+                        "pct": min(99.0, pct),
+                        "elapsed_sec": elapsed,
+                        "eta_sec": eta,
+                        "denoise_step": last_step,
+                        "denoise_total": total_steps,
+                    }
+        rc = proc.wait()
+        proc = None
+        with LOCK:
+            STATE["pid"] = None
+            STATE["h3_pgid"] = None
+        if rc != 0:
+            raise RuntimeError(
+                f"H3 render exited with code {rc} — see the log above for the "
+                f"traceback (metrics at {metrics_path}).")
+    finally:
+        if proc is not None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:      # noqa: BLE001
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+            with LOCK:
+                STATE["pid"] = None
+                STATE["h3_pgid"] = None
+
+    if not out_path.is_file():
+        raise RuntimeError(
+            f"H3 finished but no file landed at {out_path} — check the log.")
+
+    # ---- metrics → sidecar ----------------------------------------------
+    metrics: dict = {}
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8")) or {}
+    except (OSError, json.JSONDecodeError):
+        pass
+    elapsed = round(time.time() - t0, 2)
+    phases = {ph.get("name"): ph for ph in (metrics.get("phases") or [])
+              if isinstance(ph, dict)}
+    sidecar = {
+        "output": str(out_path),
+        "raw_output": str(out_path),
+        "params": {
+            **p,
+            "engine": "h3",
+            "h3_tier": tier["key"],
+            "h3_tier_label": tier["label"],
+            "width": width, "height": height, "frames": frames, "steps": steps,
+            "seed_used": seed,
+            "image": str(first_frame) if first_frame else None,
+        },
+        "command": "hailuo_h3",
+        "engine": "h3",
+        "started": job.get("started_at"),
+        "elapsed_sec": elapsed,
+        "video_duration_sec": round(max(0.0, frames / H3_FPS), 3),
+        "fps": H3_FPS,
+        "model": str(paths["dit"]),
+        "queue_id": job["id"],
+        "h3": {
+            "tier": tier["key"],
+            "runner": str(paths["runner"]),
+            "metrics_path": str(metrics_path),
+            "packed_rows": metrics.get("packed_rows"),
+            "prompt_tokens": metrics.get("prompt_tokens"),
+            "total_seconds": metrics.get("total_seconds"),
+            "mean_denoise_step_seconds": metrics.get("mean_denoise_step_seconds"),
+            "phase_seconds": {k: v.get("seconds") for k, v in phases.items()},
+            "peak_gib": max([v.get("peak_gib") or 0 for v in phases.values()] or [0]),
+            "first_frame": str(first_frame) if first_frame else None,
+        },
+    }
+    write_sidecar(out_path.with_suffix(out_path.suffix + ".json"), sidecar)
+    job["output_path"] = str(out_path)
+    p["elapsed_seconds"] = elapsed
+    push(f"[h3] done in {elapsed}s → {out_path.name}")
+    if p.get("open_when_done"):
+        subprocess.run(["open", str(out_path)], check=False)
+
+
 def run_job_inner(job: dict) -> None:
     p = job["params"]
     mode = p["mode"]
@@ -7421,6 +8022,12 @@ def run_job_inner(job: dict) -> None:
         return run_image_job_inner(job)
     if mode == "train":
         return run_train_job_inner(job)
+    # Second video engine. H3 is a self-contained subprocess pack with its own
+    # geometry rules (17n+5 frames, 32-aligned dims) and no warm helper, so it
+    # dispatches BEFORE every LTX-only clamp/validation below — none of which
+    # applies to it.
+    if (p.get("engine") or "ltx").strip().lower() == "h3":
+        return run_h3_job_inner(job)
     _apply_generation_profile_to_job(job)
     for note in p.get("generation_clamp_notes") or []:
         push(f"[generation] {p.get('generation_profile_label')}: {note}")
@@ -9678,10 +10285,17 @@ class Handler(BaseHTTPRequestHandler):
             # real "Training face · step N / total", making the Now card
             # appear stuck at Loading pipeline. Skip the override when the
             # job mode is "train".
+            #
+            # Hailuo H3 renders are in the SAME boat and for the same reason:
+            # run_h3_job_inner writes its own phase + step progress from the
+            # staged runner's stdout ("== joint_denoise ==", "step 3/8: 57.9s"),
+            # which _compute_progress can't parse — leaving the Now card on
+            # "Loading pipeline" for the whole render. Caught in validation.
             if payload.get("current"):
-                _mode = ((payload["current"].get("params") or {})
-                         .get("mode") or "").lower()
-                if _mode != "train":
+                _cur_params = (payload["current"].get("params") or {})
+                _mode = (_cur_params.get("mode") or "").lower()
+                _engine = (_cur_params.get("engine") or "ltx").lower()
+                if _mode != "train" and _engine != "h3":
                     payload["current"]["progress"] = _compute_progress(
                         payload["current"], payload.get("log") or [],
                     )
@@ -9746,6 +10360,11 @@ class Handler(BaseHTTPRequestHandler):
                 "extend_max_dim": SYSTEM_CAPS["extend_max_dim"],
                 "times": SYSTEM_CAPS.get("times", {}),
             }
+            # Hailuo H3 — the optional second video engine. Re-read every tick
+            # (it's a handful of stat() calls) so an install finishing in the
+            # Pinokio sidebar unlocks the engine pill without a panel restart,
+            # exactly like the Q8 download already does.
+            payload["h3"] = h3_status()
             payload["train_profile"] = TRAIN_PROFILE
             payload["train_presets"] = TRAIN_PRESETS
             payload["train_style_presets"] = TRAIN_STYLE_PRESETS
@@ -14252,6 +14871,10 @@ def page() -> str:
         # body[data-cap-tier="..."] CSS rules key off of. JS can also read
         # window.PHOSPHENE_CAP_TIER for any runtime branches.
         "cap_tier": cap_tier,
+        # Hailuo H3 — engine picker gating + the H3 tier table. Shipped in the
+        # bootstrap (not just /status) so the picker renders correctly on the
+        # first paint instead of flickering in a tick later.
+        "h3": h3_status(),
     })
     # Profile badge — only visible in the dev panel. Lets Mr Bizarro tell at a
     # glance which install he's looking at when both panels are open.
@@ -16823,6 +17446,53 @@ HTML = r"""<!doctype html>
     .pill-quality.active .ql-name { color: var(--accent-bright); }
     .pill-quality.active .ql-spec { opacity: 1; }
     .pill-quality.active .ql-tier { color: var(--accent-bright); opacity: 0.7; }
+
+    /* ---- Engine picker (LTX-2.3 vs Hailuo H3) --------------------------
+       One thin row above the Quality strip. Same pill vocabulary as the
+       mode bar so it reads as "which model", not "another setting". The
+       whole row is display:none for machines that can't run H3 — see
+       _engineRowVisible() — so nothing new appears for users under 64 GB. */
+    .engine-row {
+      display: flex; align-items: center; gap: 10px;
+      margin: 0 0 10px 0; padding: 0 2px; flex-wrap: wrap;
+    }
+    .engine-row[hidden] { display: none !important; }
+    .engine-row-label {
+      font-size: 11px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: .4px; font-weight: 600; flex: 0 0 auto;
+    }
+    .engine-group { display: flex; gap: 4px; flex: 0 0 auto; }
+    .engine-chip {
+      padding: 5px 12px; font-size: 12.5px;
+      flex-direction: column; align-items: flex-start; gap: 1px;
+    }
+    .engine-chip .mc-sub { font-size: 9.5px; letter-spacing: .03em; }
+    /* Not-installed / not-capable H3: dimmed but STILL CLICKABLE when the
+       Mac is capable, because the click is what opens the install card.
+       .pill-btn.disabled sets pointer-events:none, so the needs-install
+       state uses its own class instead of reusing .disabled. */
+    .engine-chip.needs-install { opacity: .62; border-style: dashed; }
+    .engine-chip.needs-install:hover { opacity: .85; }
+    .engine-row-note {
+      font-size: 11px; color: var(--muted); flex: 1 1 160px; min-width: 0;
+    }
+    .engine-hint {
+      font-size: 11.5px; color: var(--muted);
+      margin: -4px 0 10px 0; padding: 0 2px;
+      border-left: 2px solid var(--accent, #8b7bff);
+      padding-left: 8px; line-height: 1.4;
+    }
+    .engine-hint[hidden] { display: none !important; }
+
+    /* H3-active surface swap. Every control that only means something to the
+       LTX pipeline (quality pills, orientation, duration/frames, the LoRA
+       picker) carries data-ltx-only and folds away; the H3 tier strip takes
+       the quality strip's place. Seed stays — H3 honours it. */
+    /* NOTE: #h3TierGroup visibility is toggled by the `hidden` attribute in
+       JS, not here — `.quality-strip[hidden] { display:none !important }`
+       above already beats the grid rule (that fight was lost once already,
+       2026-05-17, when both quality strips showed at the same time). */
+    body[data-h3-engine="h3"] [data-ltx-only] { display: none !important; }
 
     /* Customize disclosure inside the form — sub-tier UI, lighter than
        a top-level <details>. Subtle border, indented body, distinct
@@ -21220,9 +21890,37 @@ HTML = r"""<!doctype html>
            (aspect, dims, speed, long-clips, export, audio source,
            open-when-done) is folded into the Customize disclosure below. -->
       <div class="quick-settings">
+        <!-- ============== ENGINE PICKER ==============
+             Which model renders this shot. LTX-2.3 is the built-in warm-helper
+             pipeline (every mode, every feature). Hailuo H3 is an OPTIONAL
+             ~75 GB pack that renders video + dialogue + sound jointly, and
+             only serves Text and Image — setEngine() snaps back to LTX in any
+             other mode. The row hides itself entirely on Macs that can't run
+             H3 (see _engineRowVisible), so nothing new appears for the ~80% of
+             users under 64 GB. Hidden inputs live here so FormData(genForm)
+             carries them; both are in the make_job allowlist. -->
+        <div class="engine-row" id="engineRow" hidden>
+          <span class="engine-row-label">Engine</span>
+          <div class="pill-group engine-group" id="engineGroup">
+            <button type="button" class="pill-btn engine-chip active" data-engine="ltx"
+                    title="LTX-2.3 — the built-in engine. Every mode, LoRAs, characters.">
+              LTX-2.3<span class="mc-sub sub">built in · every mode</span>
+            </button>
+            <button type="button" class="pill-btn engine-chip" data-engine="h3" id="engineChipH3"
+                    title="Hailuo H3 — joint video + dialogue + sound. Text and Image only.">
+              Hailuo H3<span class="mc-sub sub" id="engineChipH3Sub">video + dialogue</span>
+            </button>
+          </div>
+          <span class="engine-row-note" id="engineRowNote"></span>
+        </div>
+        <input type="hidden" name="engine" id="engine" value="ltx">
+        <input type="hidden" name="h3_tier" id="h3_tier" value="draft_3s">
+        <div class="engine-hint" id="h3Hint" hidden>
+          Dialogue + sound are generated jointly — write them into the prompt.
+        </div>
         <div>
           <div class="qs-label">
-            <span class="qs-name">Quality</span>
+            <span class="qs-name" id="qualityLabelName">Quality</span>
             <span class="qs-meta" id="qualityMeta"></span>
           </div>
           <!-- Compact 4-col strip. Each chip carries name + a single spec
@@ -21238,7 +21936,7 @@ HTML = r"""<!doctype html>
                inference uses transformer-distilled.safetensors and the
                identity barely locks). Forcing quality=high here means
                the user can't accidentally ship a Q4 character render. -->
-          <div class="quality-strip pill-group" id="qualityGroup">
+          <div class="quality-strip pill-group" id="qualityGroup" data-ltx-only>
             <button type="button" class="q-chip pill-btn pill-quality" data-quality="quick">
               <span class="ql-name">Quick</span>
               <span class="q-spec ql-spec sub">640×480</span>
@@ -21279,6 +21977,13 @@ HTML = r"""<!doctype html>
               <span class="ql-tier">Q8 HQ · ~5 min / 5s · best identity</span>
             </button>
           </div>
+          <!-- Hailuo H3 tier strip — the H3 replacement for the LTX Quality
+               pills. Same .quality-strip visual language, separate element so
+               neither engine's chips can ever be half-lit. Chips are rendered
+               by renderH3Tiers() from BOOT.h3.tiers (the server-side H3_TIERS
+               table stays the single source of truth for geometry + steps, so
+               a tier change is one Python edit, not two). -->
+          <div class="quality-strip pill-group" id="h3TierGroup" hidden></div>
           <!-- 2026-05-17 (Codex C+ pass 6): the character-only skip-step
                toggle moved out of here into the Customize section as
                "HQ speed". It's a Q8 sampler control, not a character
@@ -21297,7 +22002,7 @@ HTML = r"""<!doctype html>
              dig for it. Compact 2-pill row reusing the same id="aspect"
              hidden input + id="aspectGroup" click delegation + id="aspectRow"
              container that setQuality() hides when quality=quick. -->
-        <div class="mode-only show" id="aspectRow" style="display:flex;align-items:center;gap:10px;margin:6px 0 8px 0;padding:0 2px;">
+        <div class="mode-only show" id="aspectRow" data-ltx-only style="display:flex;align-items:center;gap:10px;margin:6px 0 8px 0;padding:0 2px;">
           <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600;flex:0 0 auto;">Orientation</span>
           <div class="pill-group" id="aspectGroup" style="display:flex;gap:4px;flex:0 0 auto;">
             <button type="button" class="pill-btn active" data-aspect="landscape" title="Landscape 16:9" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:center;">
@@ -21312,11 +22017,11 @@ HTML = r"""<!doctype html>
 
         <div class="mode-only show" id="quickMetricsRow">
           <div class="mini-fields">
-            <div class="mf-cell">
+            <div class="mf-cell" data-ltx-only>
               <span class="mf-label">Duration (s)</span>
               <input id="duration" value="5" type="number" min="1" max="20" step="1">
             </div>
-            <div class="mf-cell">
+            <div class="mf-cell" data-ltx-only>
               <span class="mf-label">Frames <span class="mf-hint">8k+1</span></span>
               <input name="frames" id="frames" value="121" type="number" min="1" title="Must be 8k+1 (e.g., 121, 161, 201). Duration auto-syncs.">
             </div>
@@ -21353,7 +22058,7 @@ HTML = r"""<!doctype html>
            it easy to forget. Default open so first-time users see what's
            inside without hunting for the disclosure triangle. -->
       <div class="form-divider"></div>
-      <div id="loraPickerVideoSlot">
+      <div id="loraPickerVideoSlot" data-ltx-only>
         <details id="lorasDetails" open class="loras-section">
           <summary class="loras-summary">
             <span class="loras-chevron" aria-hidden="true"><svg class="ph"><use href="#ph-caret-down-bold"/></svg></span>
@@ -23168,6 +23873,29 @@ HTML = r"""<!doctype html>
   </div>
 </div>
 
+<!-- ============== HAILUO H3 INSTALL CARD ============== -->
+<!-- Opened by clicking the H3 engine pill when the pack isn't installed, and
+     by the H3 row in the Models modal. H3 installs through Pinokio (clone +
+     venv + ~75 GB of weights), not through the panel's `hf download` path, so
+     this card explains the one sidebar click — the same shape the Sharp and
+     image-engine optional packs already use. -->
+<div id="h3InstallModal" class="models-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="h3InstallTitle"
+     onclick="if(event.target===this) closeH3InstallCard()">
+  <div class="models-card">
+    <div class="models-head">
+      <h2 id="h3InstallTitle">Hailuo H3 · optional engine</h2>
+      <button class="ghost-btn" onclick="closeH3InstallCard()">Close</button>
+    </div>
+    <div class="models-hint" id="h3InstallBody"></div>
+    <div class="models-foot">
+      Already have a checkout? Launch the panel with
+      <code>LTX_H3_ROOT</code> + <code>LTX_H3_MODELS</code> pointing at it —
+      see <code>docs/H3_ENGINE.md</code>.
+    </div>
+  </div>
+</div>
+
 <!-- ============== MODELS MODAL ============== -->
 <!-- Opened by the "models" pill in the header. Shows per-repo download
      status from /models, with a Download button per row. Active downloads
@@ -23919,6 +24647,11 @@ function setMode(mode) {
     // and doesn't need to (character_id is what drives the LoRA stack).
     const modeInp = document.getElementById('mode');
     if (modeInp) modeInp.value = 't2v';
+    // Character stacks LTX LoRAs; H3 has no LoRA path, so force LTX here too
+    // (the mode hidden field says t2v, which H3 *would* otherwise accept).
+    if (typeof _syncEngineForMode === 'function') {
+      try { _syncEngineForMode(); } catch (e) {}
+    }
     updatePromptPlaceholder();
     return;
   }
@@ -24034,6 +24767,12 @@ function setMode(mode) {
   // Q8 is missing should surface the Download Q8 CTA without waiting for
   // the next 1.5s poll tick.
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
+  // Engine ↔ mode consistency. Hailuo H3 only serves Text and Image; every
+  // other mode snaps the picker back to LTX-2.3 with a one-line note rather
+  // than letting the user queue a job the server would reject.
+  if (typeof _syncEngineForMode === 'function') {
+    try { _syncEngineForMode(); } catch (e) {}
+  }
   updatePromptPlaceholder();
 }
 
@@ -28121,6 +28860,16 @@ function setQuality(q) {
     try { _applyStgRowVisibility(); } catch (_) {}
   }
   if (LAST_STATUS) updateModelsCard(LAST_STATUS);
+  // H3 owns the render shape while it's the active engine, and setQuality()
+  // has several callers (boot, aspect changes, Load Params, the workflow-tab
+  // restore) that would otherwise stomp the tier geometry with LTX preset dims
+  // and re-arm the LTX upscale. Re-applying here makes every path
+  // self-correcting instead of leaving the quick-settings advertising
+  // "1024×576 → 1280×720 fit" for a render that ships 768×448.
+  if (document.body.dataset.h3Engine === 'h3' && typeof setH3Tier === 'function') {
+    try { setH3Tier((document.getElementById('h3_tier') || {}).value); } catch (_) {}
+    if (typeof setUpscale === 'function') { try { setUpscale('off'); } catch (_) {} }
+  }
 }
 function setAccel(a) {
   const allowed = document.getElementById('quality').value !== 'high' && currentMode !== 'extend' && currentMode !== 'keyframe';
@@ -28190,6 +28939,13 @@ function setAspect(a) {
   document.getElementById('aspect').value = a;
   document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.aspect === a));
   applyAspect(a);
+  // Same guard as setQuality: the H3 tier pins the canvas, so an orientation
+  // change (the row is hidden under H3, but boot and Load Params still call
+  // this) must not leave the quick-settings advertising dims the render won't
+  // use.
+  if (document.body.dataset.h3Engine === 'h3' && typeof setH3Tier === 'function') {
+    try { setH3Tier((document.getElementById('h3_tier') || {}).value); } catch (_) {}
+  }
 }
 
 // Compose the right-aligned line in the Customize summary. Reflects the
@@ -28292,6 +29048,255 @@ document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.onclick = ()
 document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscaleMethod(b.dataset.method); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
+
+// ============================================================================
+// Engine picker — LTX-2.3 (built in) vs Hailuo H3 (optional pack)
+// ============================================================================
+// H3 is a second VIDEO engine, not a quality setting: different model, its own
+// venv, its own subprocess, its own geometry rules. It serves Text and Image
+// only, so every other mode force-snaps back to LTX (setMode calls
+// _syncEngineForMode). The tier table comes from the server (BOOT.h3.tiers /
+// status.h3.tiers) so H3_TIERS in Python stays the single source of truth for
+// geometry + steps — a tier change is one Python edit, not two.
+//
+// Three gate states on the H3 pill:
+//   not capable  → the whole row is hidden (a 32 GB Mac never learns H3 exists)
+//   capable, not installed → dashed pill; clicking opens the install card
+//   installed    → normal pill
+let H3 = (BOOT.h3 || { capable: false, available: false, tiers: [] });
+const H3_ENGINE_LS_KEY = 'phos_video_engine';
+
+function h3TierByKey(key) {
+  return (H3.tiers || []).find(t => t.key === key) || (H3.tiers || [])[0] || null;
+}
+
+// Restore the saved tier into the hidden input HERE, at parse time — before
+// the boot sequence at the bottom of this script runs setMode('t2v'), which
+// reaches setEngine → setH3Tier and would otherwise persist the HTML default
+// over the user's choice. (Caught in validation: the tier reset to Draft on
+// every reload.)
+(function _restoreH3TierEarly() {
+  const inp = document.getElementById('h3_tier');
+  if (!inp) return;
+  let saved = null;
+  try { saved = localStorage.getItem('phos_h3_tier'); } catch (e) {}
+  if (saved && h3TierByKey(saved) && h3TierByKey(saved).key === saved) inp.value = saved;
+})();
+
+function _engineRowVisible() {
+  // Only Macs that could actually run H3 see the picker at all. Showing a
+  // permanently-disabled engine to the ~80% of users under 64 GB is noise.
+  return !!H3.capable;
+}
+
+function renderH3Tiers() {
+  const strip = document.getElementById('h3TierGroup');
+  if (!strip) return;
+  const tiers = H3.tiers || [];
+  const active = (document.getElementById('h3_tier') || {}).value || H3.default_tier;
+  strip.style.gridTemplateColumns = `repeat(${Math.max(1, tiers.length)}, 1fr)`;
+  strip.innerHTML = tiers.map(t => `
+    <button type="button" class="q-chip pill-btn pill-quality${t.key === active ? ' active' : ''}"
+            data-h3-tier="${escapeHtml(t.key)}" title="${escapeHtml(t.blurb || '')}">
+      <span class="ql-name">${escapeHtml(t.label)}</span>
+      <span class="q-spec ql-spec sub">${escapeHtml(t.spec)}</span>
+      <span class="ql-tier">${escapeHtml(t.eta)}</span>
+    </button>`).join('');
+  strip.querySelectorAll('[data-h3-tier]').forEach(b => {
+    b.onclick = () => setH3Tier(b.dataset.h3Tier);
+  });
+}
+
+function setH3Tier(key) {
+  const tier = h3TierByKey(key);
+  if (!tier) return;
+  const inp = document.getElementById('h3_tier');
+  if (inp) inp.value = tier.key;
+  document.querySelectorAll('#h3TierGroup [data-h3-tier]').forEach(b =>
+    b.classList.toggle('active', b.dataset.h3Tier === tier.key));
+  // Mirror the tier geometry into the shared hidden fields so the queue card,
+  // the "Generate" estimate and Load Params all read the truth. make_job
+  // re-stamps these server-side too — a stale tab must never win.
+  const w = document.getElementById('width');
+  const h = document.getElementById('height');
+  const f = document.getElementById('frames');
+  const s = document.getElementById('steps');
+  if (w) w.value = tier.width;
+  if (h) h.value = tier.height;
+  if (f) f.value = tier.frames;
+  if (s) s.value = tier.steps;
+  try { localStorage.setItem('phos_h3_tier', tier.key); } catch (e) {}
+  if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+}
+
+// Modes H3 can serve. Anything else must run on LTX.
+function _h3ServesMode(mode) {
+  const modes = H3.modes || ['t2v', 'i2v'];
+  // 'character' is a UI intent that submits mode=t2v, but it stacks LTX LoRAs —
+  // H3 has no LoRA path, so it stays LTX-only. i2v_clean_audio muxes an
+  // external track onto LTX video; H3 generates its own audio.
+  if (mode === 'character' || mode === 'i2v_clean_audio') return false;
+  return modes.indexOf(mode) !== -1;
+}
+
+function setEngine(engine, opts) {
+  opts = opts || {};
+  const row = document.getElementById('engineRow');
+  if (row) row.hidden = !_engineRowVisible();
+  const note = document.getElementById('engineRowNote');
+  const chipH3 = document.getElementById('engineChipH3');
+  const sub = document.getElementById('engineChipH3Sub');
+  let target = (engine === 'h3') ? 'h3' : 'ltx';
+  let reason = '';
+
+  if (target === 'h3') {
+    if (!H3.capable) { target = 'ltx'; reason = 'Hailuo H3 needs 64 GB unified memory.'; }
+    else if (!H3.available) { target = 'ltx'; reason = 'Hailuo H3 isn\'t installed yet.'; }
+    else if (!_h3ServesMode(currentMode)) {
+      target = 'ltx';
+      reason = 'Hailuo H3 renders Text and Image only — back on LTX-2.3 for this mode.';
+    } else if (currentMode === 'i2v' && H3.first_frame === false) {
+      target = 'ltx';
+      reason = 'This H3 build has no first-frame support — update the pack to use Image mode.';
+    }
+  }
+
+  const inp = document.getElementById('engine');
+  if (inp) inp.value = target;
+  document.body.dataset.h3Engine = target;
+  document.querySelectorAll('#engineGroup .engine-chip').forEach(b =>
+    b.classList.toggle('active', b.dataset.engine === target));
+
+  // H3 pill affordance: dashed + a "what it costs" subtitle when it isn't
+  // installed, so the click reads as an offer rather than a dead button.
+  if (chipH3) {
+    chipH3.classList.toggle('needs-install', !!H3.capable && !H3.available);
+    chipH3.classList.toggle('disabled', !H3.capable);
+    chipH3.title = !H3.capable
+      ? 'Needs 64 GB unified memory'
+      : (!H3.available
+          ? 'Hailuo H3 isn\'t installed — click to see how (~75 GB)'
+          : 'Hailuo H3 — joint video + dialogue + sound. Text and Image only.');
+  }
+  if (sub) sub.textContent = (H3.capable && !H3.available) ? 'not installed · ~75 GB'
+                                                          : 'video + dialogue';
+  if (note) note.textContent = reason;
+
+  // Surface swap: H3 tier strip replaces the quality strip; data-ltx-only
+  // controls fold away via CSS on body[data-h3-engine].
+  const h3Strip = document.getElementById('h3TierGroup');
+  const hint = document.getElementById('h3Hint');
+  const qLabel = document.getElementById('qualityLabelName');
+  if (h3Strip) h3Strip.hidden = (target !== 'h3');
+  if (hint) hint.hidden = (target !== 'h3');
+  if (qLabel) qLabel.textContent = (target === 'h3') ? 'H3 tier' : 'Quality';
+  if (target === 'h3') {
+    renderH3Tiers();
+    setH3Tier((document.getElementById('h3_tier') || {}).value || H3.default_tier);
+    // LTX post-processing doesn't run on an H3 render (make_job neutralises
+    // all three server-side). Mirror that in the UI or the derived line lies:
+    // it was reading "768×448 → 1280×720 fit" for a render that ships 768×448.
+    if (typeof setUpscale === 'function') { try { setUpscale('off'); } catch (e) {} }
+    if (typeof setAccel === 'function') { try { setAccel('off'); } catch (e) {} }
+    if (typeof setTemporalMode === 'function') { try { setTemporalMode('native'); } catch (e) {} }
+  } else {
+    // Coming back from H3: its frame counts live on the 17n+5 grid (124, 243),
+    // which LTX rejects — it needs 8k+1. Snap on the way out so the field the
+    // user is now looking at is a value LTX will actually accept, and the
+    // bound Duration stays truthful.
+    if (typeof snapFramesTo8kPlus1 === 'function') {
+      try { snapFramesTo8kPlus1(); } catch (e) {}
+    }
+    // Give the active quality preset its upscale back (H3 forced it off).
+    if (typeof setUpscale === 'function' && typeof QUALITY_PRESETS === 'object') {
+      const _qp = QUALITY_PRESETS[(document.getElementById('quality') || {}).value];
+      if (_qp) { try { setUpscale(_qp.upscale || 'off'); } catch (e) {} }
+    }
+    if (typeof _applyCharacterQualityStripVisibility === 'function') {
+      // Restore whichever LTX strip the current selection calls for.
+      try { _applyCharacterQualityStripVisibility(); } catch (e) {}
+    }
+  }
+  if (opts.persist !== false) {
+    try { localStorage.setItem(H3_ENGINE_LS_KEY, target); } catch (e) {}
+  }
+  if (typeof updatePromptPlaceholder === 'function') {
+    try { updatePromptPlaceholder(); } catch (e) {}
+  }
+  return target;
+}
+
+function currentEngine() {
+  return (document.getElementById('engine') || {}).value || 'ltx';
+}
+
+// Called from setMode(). Re-applies the user's PERSISTED engine choice rather
+// than whatever is currently selected, so the snap-back is temporary: flipping
+// Text → FFLF drops to LTX with a note, and flipping back to Text restores H3
+// instead of silently leaving the user on the other engine. setEngine() re-runs
+// every gate, so an unsupported mode still lands on LTX.
+function _syncEngineForMode() {
+  let want = null;
+  try { want = localStorage.getItem(H3_ENGINE_LS_KEY); } catch (e) {}
+  setEngine(want === 'h3' ? 'h3' : 'ltx', { persist: false });
+}
+
+// /status carries a fresh h3 block every tick, so an install finishing in the
+// Pinokio sidebar unlocks the engine without a panel restart (same contract
+// the Q8 download already has with the High pill).
+function updateH3Availability(s) {
+  const next = s && s.h3;
+  if (!next) return;
+  const changed = (next.available !== H3.available)
+               || (next.capable !== H3.capable)
+               || (next.first_frame !== H3.first_frame);
+  H3 = next;
+  if (changed) setEngine(currentEngine(), { persist: false });
+}
+
+document.querySelectorAll('#engineGroup .engine-chip').forEach(b => b.onclick = () => {
+  if (b.dataset.engine === 'h3' && H3.capable && !H3.available) {
+    openH3InstallCard();
+    return;
+  }
+  if (b.classList.contains('disabled')) return;
+  setEngine(b.dataset.engine);
+});
+
+// Install card — H3 is a Pinokio-script install (clone + venv + ~75 GB of
+// weights), not an in-panel `hf download`, so the panel explains the one
+// sidebar click rather than pretending it can do it itself. Same shape the
+// Sharp/Qwen optional packs use.
+function openH3InstallCard() {
+  const m = document.getElementById('h3InstallModal');
+  const body = document.getElementById('h3InstallBody');
+  if (body) {
+    const missing = (H3.missing || []);
+    body.innerHTML = `
+      <p style="margin:0 0 10px">
+        <b>Hailuo H3</b> is a second video engine: one prompt in, video
+        <em>and</em> synced dialogue <em>and</em> sound out. It runs fully
+        locally, alongside LTX — installing it changes nothing about your
+        existing renders.
+      </p>
+      <p style="margin:0 0 10px;color:var(--muted)">
+        ${escapeHtml(H3.size_note || '')}
+      </p>
+      <p style="margin:0 0 10px">
+        Install it from Pinokio, not from here: open the <b>Phosphene</b> entry
+        in the Pinokio sidebar and click
+        <b>“Install Hailuo H3 (optional, ~75 GB)”</b>. The panel picks it up
+        within a couple of seconds — no restart.
+      </p>
+      ${missing.length ? `<p style="margin:0;color:var(--muted);font-size:12px">
+        Currently missing: ${escapeHtml(missing.join('; '))}</p>` : ''}`;
+  }
+  if (m) m.style.display = 'flex';
+}
+function closeH3InstallCard() {
+  const m = document.getElementById('h3InstallModal');
+  if (m) m.style.display = 'none';
+}
 
 // Prompt enhancement via Gemma — wraps the upstream CLI's `enhance`
 // subcommand. Cold start ~12-15s (Gemma load), warm ~5s. Blocks the UI
@@ -28486,9 +29491,14 @@ function updateDerived() {
   }
 
   const warns = [];
+  // Hailuo H3 counts frames on a 17n+5 grid, not LTX's 8k+1, and its tiers
+  // are fixed — so the 8k+1 nudge is not just irrelevant there, it's wrong
+  // (it told the user 124 was a mistake when 124 is the HQ·5s tier). The
+  // 32-alignment rule holds for both engines and stays.
+  const _h3Active = document.body.dataset.h3Engine === 'h3';
   if (w % 32 !== 0) warns.push(`Width ${w} isn't a multiple of 32 (closest ${Math.round(w/32)*32})`);
   if (h % 32 !== 0) warns.push(`Height ${h} isn't a multiple of 32 (closest ${Math.round(h/32)*32})`);
-  if (f > 1 && (f - 1) % 8 !== 0) {
+  if (!_h3Active && f > 1 && (f - 1) % 8 !== 0) {
     const closest = Math.max(1, Math.round((f - 1) / 8) * 8 + 1);
     warns.push(`Frames work best as 8k+1 (closest ${closest})`);
   }
@@ -29213,6 +30223,9 @@ async function poll() {
   // Inline models card — top-of-form, big, can't miss it. State logic
   // lives in updateModelsCard so we don't bloat poll() further.
   updateModelsCard(s);
+  // Hailuo H3 install state — refreshes the engine pill in place when the
+  // pack lands (or disappears), same live-unlock contract Q8 already has.
+  if (typeof updateH3Availability === 'function') updateH3Availability(s);
 
   // Queue pill + tab badge. Animate the bottom-pane Queue badge with
   // a brief scale-up "pop" when the count goes up — draws the eye to
@@ -30836,7 +31849,22 @@ function renderOutputInfoBody(path, data) {
   // ---- Generation parameters ----
   const genRows = [];
   genRows.push(`<dt>Mode</dt><dd>${escapeHtml(modeLabel)}</dd>`);
-  genRows.push(`<dt>Quality</dt><dd>${escapeHtml((p.quality || 'standard').replace(/^./, c => c.toUpperCase()))}</dd>`);
+  // A Hailuo H3 render has no LTX quality preset. `params.quality` is just
+  // whatever the quality strip happened to hold when Generate was pressed —
+  // the H3 TIER defined this render's geometry — so printing "Quality:
+  // Balanced" on an H3 clip states something that was never true of it.
+  // Exact-match the tier rather than reusing h3TierByKey(), which falls back
+  // to the first tier and would relabel an unknown key as "Draft · 3s"; on a
+  // machine with no H3 pack installed (H3.tiers empty) the raw key is printed,
+  // which is honest, where a fallback label would not be.
+  if (String(p.engine || 'ltx').toLowerCase() === 'h3') {
+    const h3TierKey = p.h3_tier || (data && data.h3 && data.h3.tier) || '';
+    const h3TierDef = ((H3 && H3.tiers) || []).find(t => t.key === h3TierKey);
+    genRows.push(`<dt>Engine</dt><dd>Hailuo H3</dd>`);
+    genRows.push(`<dt>H3 tier</dt><dd>${escapeHtml(h3TierDef ? h3TierDef.label : (h3TierKey || '—'))}</dd>`);
+  } else {
+    genRows.push(`<dt>Quality</dt><dd>${escapeHtml((p.quality || 'standard').replace(/^./, c => c.toUpperCase()))}</dd>`);
+  }
   if (p.accel && p.accel !== 'off') {
     genRows.push(`<dt>Speed</dt><dd>${escapeHtml(p.accel.replace(/^./, c => c.toUpperCase()))}</dd>`);
   }
@@ -31153,6 +32181,20 @@ document.getElementById('genForm').addEventListener('submit', async e => {
         fd.set('stg_scale', _stgEl.value || '0');
       } else {
         fd.delete('stg_scale');
+      }
+    }
+    // Hailuo H3: send the tier's geometry explicitly. make_job re-stamps it
+    // server-side too (a stale tab must never win), but posting the truth
+    // means the queue card is right the instant the job lands, and it can't
+    // carry an LTX 8k+1 frame count into a runner that snaps to 17n+5.
+    if ((fd.get('engine') || 'ltx').toString() === 'h3') {
+      const _t = (typeof h3TierByKey === 'function')
+        ? h3TierByKey((fd.get('h3_tier') || '').toString()) : null;
+      if (_t) {
+        fd.set('width', String(_t.width));
+        fd.set('height', String(_t.height));
+        fd.set('frames', String(_t.frames));
+        fd.set('steps', String(_t.steps));
       }
     }
     await api('/queue/add','POST',fd);
@@ -33850,7 +34892,39 @@ async function refreshModelsModal({ silent = false } = {}) {
         ${btnHtml}
       </li>`;
   }).join('');
-  list.innerHTML = rows || `<li class="empty-state">No model manifest found — required_files.json is missing or unreadable.</li>`;
+  // Hailuo H3 — an optional PACK, not an `hf download` repo (clone + its own
+  // venv + ~75 GB of weights), so it can't come from the manifest loop above.
+  // It still belongs in this list: this is where users look for "what else can
+  // I install". Rendered from the live /status snapshot, with a button that
+  // routes to the same install card the engine pill opens.
+  let h3Row = '';
+  {
+    const h3 = (LAST_STATUS && LAST_STATUS.h3) || (typeof H3 === 'object' ? H3 : null);
+    if (h3 && h3.capable) {
+      const ready = !!h3.available;
+      const cls = ready ? 'ready' : 'missing';
+      const icon = ready
+        ? '<svg class="ph" aria-hidden="true"><use href="#ph-check-bold"/></svg>'
+        : '<svg class="ph" aria-hidden="true"><use href="#ph-x-circle"/></svg>';
+      const statusText = ready
+        ? `Ready · engine picker unlocked · ${escapeHtml(h3.root || '')}`
+        : 'Not installed · install from the Pinokio sidebar';
+      const btn = ready
+        ? `<button class="ghost" disabled>Installed</button>`
+        : `<button onclick="openH3InstallCard()">How to install</button>`;
+      h3Row = `
+        <li class="${cls}">
+          <span class="icon">${icon}</span>
+          <div class="meta">
+            <span class="ttl">Hailuo H3 (MiniMax-H3 FL2VA) · <span style="color:var(--muted)">optional</span></span>
+            <span class="sub">Second video engine — joint video + dialogue + sound</span>
+            <span class="sub">${statusText} · ${escapeHtml(h3.size_note || '')}</span>
+          </div>
+          ${btn}
+        </li>`;
+    }
+  }
+  list.innerHTML = (rows + h3Row) || `<li class="empty-state">No model manifest found — required_files.json is missing or unreadable.</li>`;
   // Footer summarises required vs optional counts.
   const reqRepos = repos.filter(r => r.kind !== 'optional');
   const optRepos = repos.filter(r => r.kind === 'optional');
@@ -34247,6 +35321,16 @@ setMode('t2v');
 setAspect('landscape');         // sets aspect first so the default preset orients correctly
 setQuality('balanced');         // bundles quality + dims; respects current aspect
 applyTierTimes();               // rewrite Quality pill subtitles to match this Mac
+// Engine picker — re-apply the last-used engine after the boot sequence above
+// has settled the mode. setEngine() re-runs every gate (capable / installed /
+// mode), so a stale localStorage value from a machine that has since lost the
+// pack just lands back on LTX. The tier was restored at parse time (see
+// _restoreH3TierEarly).
+(function restoreEngineChoice() {
+  let engine = null;
+  try { engine = localStorage.getItem(H3_ENGINE_LS_KEY); } catch (e) {}
+  setEngine(engine === 'h3' ? 'h3' : 'ltx', { persist: false });
+})();
 updateCustomizeSummary();
 updateDerived();
 
