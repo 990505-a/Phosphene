@@ -353,13 +353,35 @@ def _settings_defaults() -> dict:
         # Memory/speed policy. Defaults to Auto so 5 s clips keep the fast
         # full-decode path while long/high-pressure renders stay protected.
         "memory_policy": DEFAULT_MEMORY_POLICY,
-        # NOTE: opt-in anonymous telemetry was experimented with in
-        # 2026-05 and removed on 2026-05-22 (see commit history) — Mr
-        # Bizarro chose to stay on GitHub-data-only signal (see
-        # docs/stats.html + scripts/fetch_repo_stats.py) rather than
-        # ship anything that touches the user's render path. Existing
-        # panel_settings.json files may still have analytics_* keys;
-        # they're now silently ignored.
+        # ---- Anonymous usage analytics -----------------------------------
+        # Full contract in the "Anonymous usage analytics" section further
+        # down this file, and the event-by-event schema in docs/ANALYTICS.md.
+        # Short version: counts only, never content, and completely inert
+        # until a PostHog key is configured.
+        #
+        # Default ON. This is a change of posture from the 2026-05 opt-in
+        # experiment that was reverted (da1d6f5) — that one was OFF by
+        # default and therefore told us nothing. A settings file left over
+        # from that 24-hour window may already carry
+        # `analytics_enabled: false`; _load_settings() backfills with
+        # setdefault, so that user's explicit opt-out is preserved rather
+        # than silently flipped back on. That is the intended behaviour.
+        "analytics_enabled": True,
+        # Random UUID4, generated on first use and never derived from
+        # anything about the machine. The only identifier we send.
+        "analytics_install_id": "",
+        # PostHog PROJECT key (write-only, safe to hold on disk). Empty =
+        # analytics opens no sockets at all. Maintainer pastes this in
+        # Settings to switch the fleet on; PHOSPHENE_ANALYTICS_KEY overrides.
+        "analytics_key": "",
+        # PostHog PERSONAL API key (read-only, maintainer-only). Powers the
+        # fleet view on /stats/usage. Never used for capture.
+        "analytics_query_key": "",
+        # Last boot's optional-pack snapshot, diffed on the next boot to
+        # emit pack_state_change. Panel-written, not user-editable.
+        "analytics_last_packs": {},
+        # Whether the one-line boot disclosure has already been printed.
+        "analytics_disclosed": False,
     }
 
 
@@ -573,9 +595,31 @@ def _validate_settings_patch(patch: dict) -> tuple[dict, str | None]:
             return {}, f"unknown memory_policy: {policy}"
         out["memory_policy"] = policy
 
-    # analytics_enabled / analytics_install_id used to be validated here;
-    # both removed 2026-05-22 when opt-in analytics was rolled back. Any
-    # legacy keys in panel_settings.json are now silently ignored.
+    # ---- Anonymous usage analytics -------------------------------------
+    # Additive only: three user-settable fields. `analytics_install_id`,
+    # `analytics_last_packs` and `analytics_disclosed` are deliberately NOT
+    # accepted here — they're panel bookkeeping written via
+    # _settings_set_internal(), and a form must not be able to set the
+    # install id (that would let a page correlate installs).
+    if "analytics_enabled" in patch:
+        # Same urlencoded-bool coercion as spicy_mode / models_card_dismissed.
+        v = patch["analytics_enabled"]
+        if isinstance(v, bool):
+            out["analytics_enabled"] = v
+        else:
+            out["analytics_enabled"] = str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    for _akey, _alabel in (("analytics_key", "PostHog project key"),
+                           ("analytics_query_key", "PostHog personal API key")):
+        if _akey in patch:
+            val = str(patch[_akey]).strip()
+            # Empty is legal and meaningful: it clears the key and (for
+            # analytics_key) returns the panel to fully-inert.
+            if val and not (8 <= len(val) <= 256):
+                return {}, f"{_alabel} length looks wrong (expected 8-256 chars)"
+            if any(c.isspace() for c in val):
+                return {}, f"{_alabel} cannot contain whitespace"
+            out[_akey] = val
 
     return out, None
 
@@ -635,6 +679,19 @@ def get_settings_public() -> dict:
         "models_card_dismissed": bool(s.get("models_card_dismissed", False)),
         "spicy_mode": bool(s.get("spicy_mode", False)),
         "memory_policy": s.get("memory_policy", DEFAULT_MEMORY_POLICY),
+        # Analytics. Same has_X-boolean treatment as the other secrets —
+        # the keys themselves never come back over the wire. The install id
+        # DOES come back: it's a random UUID with no meaning off this
+        # machine, and showing users the exact identifier the panel sends
+        # is the entire point of the Settings row.
+        "analytics_enabled": bool(s.get("analytics_enabled", True)),
+        "analytics_install_id": str(s.get("analytics_install_id", "") or ""),
+        "has_analytics_key": bool(str(s.get("analytics_key", "") or "").strip()
+                                  or ANALYTICS_KEY_DEFAULT
+                                  or os.environ.get("PHOSPHENE_ANALYTICS_KEY", "").strip()),
+        "has_analytics_query_key": bool(
+            str(s.get("analytics_query_key", "") or "").strip()
+            or os.environ.get("PHOSPHENE_ANALYTICS_QUERY_KEY", "").strip()),
     }
 
 
@@ -1582,23 +1639,27 @@ def _train_required_models() -> list[dict]:
     is present locally. Surfaces missing models to the UI so the user can
     one-click download them via the existing hf flow.
 
-    Train Character requires `transformer-dev.safetensors` from the LTX-2.3
-    Q4 repo (the dev base — distilled is structurally wrong for training:
-    different sigma schedule than the trainer's flow-matching objective).
-    The default install ships distilled but NOT dev to save ~11 GB on disk
-    for users who only run inference.
+    Train Character requires the FULL-PRECISION `transformer-dev.safetensors`
+    from the LTX-2.3 Q8 repo (~21 GB). The dev base is required because
+    distilled is structurally wrong for training (different sigma schedule
+    than the trainer's flow-matching objective) — and it must be the Q8
+    repo's full-precision copy because the Q4 repo's transformer-dev is
+    QUANTIZED (~11 GB): the trainer refuses it (train.py's
+    FULL_DEV_MIN_BYTES) since it silently trains a near-zero LoRA (#35).
+    The default install ships neither, to save disk for inference-only
+    users.
 
     Gemma + the rest of the Q4 stack (vae, audio, etc.) are already required
     for inference so they should already be present, but we check anyway.
     """
     q4_local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
     q8_local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q8"
-    q4_repo_id = "dgrauet/ltx-2.3-mlx-q4"
     gemma_local_dir = ROOT / "mlx_models" / "gemma-3-12b-it-4bit"
     gemma_repo_id = "mlx-community/gemma-3-12b-it-4bit"
 
     def _file_present(local_dir: Path, repo_id: str, filename: str,
-                      *, extra_dirs: list[Path] | None = None) -> bool:
+                      *, extra_dirs: list[Path] | None = None,
+                      min_bytes: int = _MIN_FILE_BYTES) -> bool:
         """Check known locations for a model file in this order:
 
           1. The primary local_dir (where the helper expects it by default).
@@ -1636,26 +1697,37 @@ def _train_required_models() -> list[dict]:
             pass
         for c in candidates:
             try:
-                if c.exists() and c.stat().st_size >= _MIN_FILE_BYTES:
+                if c.exists() and c.stat().st_size >= min_bytes:
                     return True
             except OSError:
                 continue
         return False
 
+    # Mirror of lora_lab/train.py FULL_DEV_MIN_BYTES: anything smaller is a
+    # quantized transformer-dev, which the trainer refuses. The preflight
+    # must not show green on a file the trainer will reject (#35).
+    _FULL_DEV_MIN_BYTES = 15 * 1000**3
+
     items = [
         {
             "key": "ltx_dev_transformer",
-            "label": "LTX-2.3 dev transformer (training-only)",
+            "label": "LTX-2.3 dev transformer (training-only, full precision)",
             "blurb": "Required for training. Standard inference uses the distilled "
                      "transformer instead; the dev transformer has the right "
-                     "flow-matching schedule for LoRA-from-images training.",
-            "repo_id": q4_repo_id,
+                     "flow-matching schedule for LoRA-from-images training. "
+                     "Must be the full-precision (~21 GB) copy — a quantized "
+                     "dev transformer trains a LoRA that never applies.",
+            "repo_id": "dgrauet/ltx-2.3-mlx-q8",
             "filename": "transformer-dev.safetensors",
-            "local_dir": str(q4_local_dir),
-            "size_gb": 11.0,
-            "ready": _file_present(q4_local_dir, q4_repo_id,
+            "local_dir": str(q8_local_dir),
+            "size_gb": 20.6,
+            # Size-gated: an 11 GB quantized dev (the old preflight's Q4
+            # download, still on many disks) must show NOT-ready, because
+            # the trainer refuses it and the LoRA comes out dead (#35).
+            "ready": _file_present(q8_local_dir, "dgrauet/ltx-2.3-mlx-q8",
                                    "transformer-dev.safetensors",
-                                   extra_dirs=[q8_local_dir]),
+                                   extra_dirs=[q4_local_dir],
+                                   min_bytes=_FULL_DEV_MIN_BYTES),
         },
         {
             "key": "gemma_text_encoder",
@@ -1674,7 +1746,10 @@ def _train_required_models() -> list[dict]:
 
 def _train_install_dev_transformer(push_log) -> dict:
     """Trigger an hf download for just `transformer-dev.safetensors` from
-    the LTX-2.3 Q4 repo. Reuses the same `hf download` binary the existing
+    the LTX-2.3 Q8 repo — the FULL-PRECISION copy the trainer requires.
+    (Until v3.4.1 this pulled the Q4 repo's transformer-dev, which is
+    quantized: the trainer refuses it and the LoRA trains dead — #35.)
+    Reuses the same `hf download` binary the existing
     HF download flow uses; runs synchronously in a worker thread so the
     caller can stream progress (the panel currently invokes this from a
     /train/install endpoint that returns quickly + then polls /status).
@@ -1689,8 +1764,8 @@ def _train_install_dev_transformer(push_log) -> dict:
                 "error": f"another download is already active "
                          f"({DOWNLOAD.get('repo_id', '?')})."}
 
-    repo_id = "dgrauet/ltx-2.3-mlx-q4"
-    local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q4"
+    repo_id = "dgrauet/ltx-2.3-mlx-q8"
+    local_dir = ROOT / "mlx_models" / "ltx-2.3-mlx-q8"
     local_dir.mkdir(parents=True, exist_ok=True)
 
     hf_bin = HF_BIN if HF_BIN is not None else _resolve_hf()
@@ -1717,7 +1792,8 @@ def _train_install_dev_transformer(push_log) -> dict:
     def _runner():
         try:
             push_log(f"[hf] dev transformer download started "
-                     f"({repo_id} / transformer-dev.safetensors, ~11 GB).")
+                     f"({repo_id} / transformer-dev.safetensors, ~21 GB — "
+                     f"the full-precision copy training requires).")
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, env=env, start_new_session=True)
@@ -3162,6 +3238,220 @@ def _verify_safetensors(path: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+# ---- Model file PLACEMENT verification ---------------------------------------
+# A checksum answers "is this file's content correct?". It cannot answer "is the
+# file in the right PLACE?" — and a byte-perfect weight at the wrong path fails
+# just as hard as a corrupt one, while every existing check reports green:
+#
+#   * a 4-bit `transformer-dev.safetensors` left in the Q4 dir SHADOWS the
+#     full-precision one in the Q8 dir. The trainer resolves the Q4 dir first, so
+#     it silently optimizes against quantized weights and emits a near-zero LoRA
+#     (GitHub #35 / #36, reported by @saved-j — every checksum passed).
+#   * a declared weight that got moved reads as plain "missing", so the panel
+#     offers a fresh ~19 GB download while the bytes sit one directory over.
+#
+# required_files.json already declares each file's expected RELATIVE PATH inside
+# its repo dir, so placement is verifiable from the manifest we already load —
+# no new metadata, no new network calls.
+#
+# Cost discipline: this is stat-only. One non-recursive listdir per declared
+# model dir, no hashing. The deep pass may hand in a hasher, and even then a
+# candidate is hashed ONLY when (a) the declared copy is MISSING — a file
+# deep-verify therefore never hashed anyway — and (b) the candidate's size
+# already matches the expected size. So placement verification adds zero
+# full-file reads to a healthy install.
+#
+# False-positive discipline (these all occur on real installs):
+#   * weight files only. Sidecar configs (`config.json`, `tokenizer.json`)
+#     legitimately repeat across model dirs and are not placement-sensitive.
+#   * a same-NAME, same-SIZE sibling copy is benign, not a shadow: the Q4 and Q8
+#     repos both legitimately ship `ltx-2.3-22b-distilled-lora-384.safetensors`.
+#     Only a copy that DIFFERS from the declared one can mis-resolve.
+#   * nothing is flagged unless the declared copy actually exists to be shadowed.
+#     On a Q4-only install the ~11 GB dev transformer in the Q4 dir is what our
+#     own Train → Preflight puts there; it shadows nothing, so it stays quiet.
+#   * repos that aren't installed at all are skipped (an absent optional Q8 is
+#     not "misplaced"), and HF-cache-backed installs are skipped entirely: that
+#     layer is a content-addressed blob farm with symlinked snapshots, where
+#     placement is huggingface_hub's business, not ours.
+_PLACEMENT_EXT = ".safetensors"
+
+
+def _fmt_gb(n: int) -> str:
+    return f"{n / 1e9:.1f} GB"
+
+
+def _short_path(p: Path) -> str:
+    """ROOT-relative when possible — matches how the manifest and UI name files."""
+    try:
+        return str(Path(p).relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
+def _placed_size(p: Path) -> int:
+    """Size in bytes, or 0 if absent/too small to be a real weight. Uses the same
+    `_MIN_FILE_BYTES` floor as `_repo_missing`, so 'present' means the same thing
+    here as everywhere else in the panel."""
+    try:
+        size = p.stat().st_size
+    except OSError:
+        return 0
+    return size if size >= _MIN_FILE_BYTES else 0
+
+
+def _placement_dirs() -> list[tuple[dict, Path]]:
+    """(repo_def, resolved_dir) for every manifest repo whose declared directory
+    exists on disk. Honors the LTX_Q8_LOCAL override the rest of the panel uses."""
+    out = []
+    for r in _repos():
+        base = Q8_LOCAL_PATH if r.get("key") == "q8" else (ROOT / r["local_dir"])
+        try:
+            if base.is_dir():
+                out.append((r, base))
+        except OSError:
+            continue
+    return out
+
+
+def _placement_errors(expected: dict | None = None, hasher=None) -> list[dict]:
+    """Audit installed weights against the placement the manifest declares.
+
+    Returns entries in the exact shape the header and checksum checks emit —
+    ``{"repo", "file", "reason"}`` — so /status, the red banner, the boot warning
+    and one-click Repair all consume them unchanged. (Repair is also the correct
+    cure for a shadow copy: it deletes that repo's copy of the file and re-runs
+    the download, whose `download_include` allowlist never puts it back.) Two
+    extra keys — ``placement``/``found_at``/``expected_at`` — ride along for
+    consumers that want the two paths without parsing prose.
+
+    expected: optional {(repo_key, relpath): {"size": int, "sha256": str}} of
+              known-good metadata (upstream HF info, supplied by the deep pass).
+              The manifest's own `file_sizes` block is always used as a fallback.
+    hasher:   optional callable(Path) -> sha256 hex, supplied by the deep pass so
+              a relocated file can be confirmed by CONTENT rather than by name.
+    """
+    dirs = _placement_dirs()
+    meta = dict(expected or {})
+
+    declared: list[tuple[dict, Path, str]] = []   # (repo, dir, relpath)
+    pairs: set[tuple[str, str]] = set()           # (dir, relpath) the manifest declares
+    homes: dict[str, list[tuple[dict, Path, str]]] = {}   # basename -> declared homes
+    for r, base in dirs:
+        for rel in r.get("files", []):
+            if not rel.endswith(_PLACEMENT_EXT):
+                continue
+            declared.append((r, base, rel))
+            pairs.add((str(base), rel))
+            homes.setdefault(Path(rel).name, []).append((r, base, rel))
+            man_size = int((r.get("file_sizes") or {}).get(rel, 0) or 0)
+            if man_size and not meta.get((r["key"], rel), {}).get("size"):
+                meta.setdefault((r["key"], rel), {})["size"] = man_size
+
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _flag(repo_key: str, fname: str, reason: str, found: str, want: str) -> None:
+        if (repo_key, fname) in seen:
+            return
+        seen.add((repo_key, fname))
+        out.append({"repo": repo_key, "file": fname, "reason": reason,
+                    "placement": True, "found_at": found, "expected_at": want})
+
+    # Pass 1 — SHADOW copies. A weight sitting in a declared model dir under a
+    # name the manifest places somewhere ELSE, whose content differs from the
+    # declared copy. Reported against the repo that OWNS THE DIRECTORY holding
+    # the stray, so Repair deletes the stray and never the good copy.
+    for r, base in dirs:
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(_PLACEMENT_EXT) or (str(base), name) in pairs:
+                continue
+            candidates = homes.get(name) or []
+            if not candidates:
+                continue          # a name we never place anywhere — the user's own file
+            stray = base / name
+            stray_size = _placed_size(stray)
+            if not stray_size:
+                continue
+            for _hr, hbase, hrel in candidates:
+                if hbase == base:
+                    continue      # same dir, different relpath — not a misplacement
+                home = hbase / hrel
+                home_size = _placed_size(home)
+                if not home_size or home_size == stray_size:
+                    continue      # nothing to shadow (Pass 2's job), or a benign twin
+                _flag(r["key"], name,
+                      f"misplaced: {_short_path(stray)} ({_fmt_gb(stray_size)}) is not a "
+                      f"file this model declares, and it shadows the real {name} at "
+                      f"{_short_path(home)} ({_fmt_gb(home_size)}) - anything that "
+                      f"resolves this directory first loads the wrong weights",
+                      _short_path(stray), _short_path(home))
+                break
+
+    # Pass 2 — DISPLACED files. A declared weight is missing from where it
+    # belongs while a same-named file sits in another declared model dir. This is
+    # the case the plain "missing" report turns into a needless multi-GB
+    # re-download. Only runs for repos that are actually installed, so an absent
+    # optional repo is never described as misplaced.
+    for r, base, rel in declared:
+        if not any(_placed_size(base / f) for f in r.get("files", [])):
+            continue              # repo not installed here at all — not our business
+        home = base / rel
+        if _placed_size(home):
+            continue              # exactly where it should be
+        name = Path(rel).name
+        want = meta.get((r["key"], rel), {})
+        want_size = int(want.get("size") or 0)
+        want_sha = want.get("sha256") or ""
+        for _r2, base2 in dirs:
+            if base2 == base:
+                continue
+            cand = base2 / name
+            if (str(base2), name) in pairs and _placed_size(cand):
+                continue          # that dir declares this name too — it's their copy
+            cand_size = _placed_size(cand)
+            if not cand_size:
+                continue
+            detail = (f"same name, {_fmt_gb(cand_size)} - verify it is the same "
+                      f"file before moving it")
+            if want_size and cand_size != want_size:
+                detail = (f"that copy is {_fmt_gb(cand_size)}, not the expected "
+                          f"{_fmt_gb(want_size)} - a different build of {name}, "
+                          f"so it will not stand in for the missing file")
+            elif want_size and want_sha and hasher is not None:
+                # The only hash placement ever asks for: the declared copy is
+                # missing (so the checksum pass skipped it) and the candidate's
+                # size already matches. Net-zero extra hashing on a healthy install.
+                got = ""
+                try:
+                    got = hasher(cand)
+                except OSError as e:   # unreadable candidate is not fatal
+                    detail = f"could not read that copy to confirm it ({e})"
+                if got == want_sha:
+                    detail = (f"same content (sha256 matches) - move it back instead of "
+                              f"re-downloading {_fmt_gb(cand_size)}")
+                elif got:
+                    detail = ("same size but different content (sha256 mismatch) - "
+                              "not the missing file")
+            elif want_size and cand_size == want_size:
+                detail = (f"same name and exactly the expected {_fmt_gb(want_size)} - "
+                          f"almost certainly the missing file in the wrong folder")
+            else:
+                detail = (f"same name, {_fmt_gb(cand_size)} - run Verify (deep) to "
+                          f"confirm it is the same file before moving it")
+            _flag(r["key"], rel,
+                  f"wrong location: expected at {_short_path(home)}, found at "
+                  f"{_short_path(cand)} - {detail}",
+                  _short_path(cand), _short_path(home))
+            break
+
+    return out
+
+
 _INTEGRITY_LOCK = threading.Lock()
 _INTEGRITY_CACHE: dict = {"ts": 0.0, "data": None}
 
@@ -3198,6 +3488,20 @@ def _model_integrity(force: bool = False) -> dict:
             if not ok:
                 result["ok"] = False
                 result["bad"].append({"repo": r["key"], "file": fname, "reason": reason})
+    # Placement audit — right content, wrong path. Folded into the same bad[] the
+    # banner, boot warning and Repair already consume. It is stat-only, so it is
+    # safe in the /status path, and unlike the header scan above it deliberately
+    # runs for INCOMPLETE repos too: "a declared file is missing here and the
+    # bytes are one directory over" is exactly what it exists to catch.
+    try:
+        already = {(b["repo"], b["file"]) for b in result["bad"]}
+        placement = [p for p in _placement_errors()
+                     if (p["repo"], p["file"]) not in already]
+    except Exception:  # noqa: BLE001 — integrity must never break /status
+        placement = []
+    if placement:
+        result["ok"] = False
+        result["bad"].extend(placement)
     with _INTEGRITY_LOCK:
         _INTEGRITY_CACHE["ts"] = now
         _INTEGRITY_CACHE["data"] = result
@@ -3225,11 +3529,15 @@ _DEEP_VERIFY_LOCK = threading.Lock()
 _DEEP_VERIFY: dict = {"active": False, "result": None, "progress": "", "started_ts": 0.0}
 
 
-def _upstream_shas(repo_id: str) -> dict:
-    """filename -> published SHA-256 from HuggingFace LFS metadata, cached for
+def _upstream_meta(repo_id: str) -> dict:
+    """filename -> {"sha256", "size"} from HuggingFace LFS metadata, cached for
     the session (upstream rarely changes mid-session). Returns {} on any
     network/lib failure — the caller treats 'unknown' as unverifiable, never as
-    corrupt, so a flaky lookup can never trigger a spurious re-download."""
+    corrupt, so a flaky lookup can never trigger a spurious re-download.
+
+    The published SIZE comes back in the same `files_metadata=True` response as
+    the checksum (no extra request), and the placement audit uses it to decide
+    whether a relocated file is even worth hashing."""
     with _UPSTREAM_SHA_LOCK:
         if repo_id in _UPSTREAM_SHA_CACHE:
             return _UPSTREAM_SHA_CACHE[repo_id]
@@ -3240,15 +3548,27 @@ def _upstream_shas(repo_id: str) -> dict:
                                  token=_active_hf_token() or None)
         for s in info.siblings:
             lfs = getattr(s, "lfs", None)
-            sha = lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
-            if sha:
-                out[s.rfilename] = sha
+            if isinstance(lfs, dict):
+                sha, lfs_size = lfs.get("sha256"), lfs.get("size")
+            else:
+                sha = getattr(lfs, "sha256", None)
+                lfs_size = getattr(lfs, "size", None)
+            size = int(lfs_size or getattr(s, "size", 0) or 0)
+            if sha or size:
+                out[s.rfilename] = {"sha256": sha or "", "size": size}
     except Exception as e:  # noqa: BLE001 — network/lib failure → unverifiable
         push(f"[deep-verify] upstream checksum lookup failed for {repo_id}: {e}")
         return {}
     with _UPSTREAM_SHA_LOCK:
         _UPSTREAM_SHA_CACHE[repo_id] = out
     return out
+
+
+def _upstream_shas(repo_id: str) -> dict:
+    """filename -> published SHA-256. Thin view over `_upstream_meta` (same
+    single cached lookup); files upstream publishes without a checksum are
+    omitted, so callers still read a missing key as 'unverifiable'."""
+    return {k: v["sha256"] for k, v in _upstream_meta(repo_id).items() if v.get("sha256")}
 
 
 def _sha256_file(path: Path) -> str:
@@ -3274,7 +3594,7 @@ def _deep_verify_thread() -> None:
             repo_def = defs.get(r["key"], {})
             repo_id = repo_def.get("repo_id", "")
             base = Path(r.get("location") or (ROOT / r["local_dir"]))
-            up = _upstream_shas(repo_id)
+            up = {k: v["sha256"] for k, v in _upstream_meta(repo_id).items() if v.get("sha256")}
             for fname in repo_def.get("files", []):
                 if not fname.endswith(".safetensors"):
                     continue
@@ -3304,6 +3624,25 @@ def _deep_verify_thread() -> None:
                         "repo": r["key"], "file": fname,
                         "reason": f"checksum mismatch (stale/corrupt: upstream {exp[:10]}…, local {local[:10]}…)",
                     })
+        # Placement audit — right content, WRONG PATH. A checksum pass is blind
+        # to it by construction: every byte can be correct and the loader still
+        # resolves the wrong file (#35/#36). Hand it the published sizes and
+        # checksums (already cached from the lookups above) so a relocated weight
+        # can be confirmed by CONTENT, then fold findings into the same bad[].
+        exp_meta: dict = {}
+        for r in _repos():
+            repo_id = r.get("repo_id", "")
+            base = Q8_LOCAL_PATH if r.get("key") == "q8" else (ROOT / r["local_dir"])
+            if not repo_id or not any(_placed_size(base / f) for f in r.get("files", [])):
+                continue                # not installed here — don't ask upstream
+            for fname, m in _upstream_meta(repo_id).items():
+                exp_meta[(r["key"], fname)] = m
+        already = {(b["repo"], b["file"]) for b in result["bad"]}
+        for p in _placement_errors(expected=exp_meta, hasher=_sha256_file):
+            if (p["repo"], p["file"]) in already:
+                continue
+            result["ok"] = False
+            result["bad"].append(p)
     except Exception as e:  # noqa: BLE001 — must never crash the thread silently
         result["error"] = str(e)
     finally:
@@ -3314,9 +3653,16 @@ def _deep_verify_thread() -> None:
         if result.get("error"):
             push(f"[deep-verify] error: {result['error']}")
         elif not result.get("ok"):
-            push("[deep-verify] DONE — checksum mismatch on: "
-                 + ", ".join(f"{b['repo']}/{b['file']}" for b in result["bad"])
-                 + ". Use Repair to re-download.")
+            _misplaced = [b for b in result["bad"] if b.get("placement")]
+            _corrupt = [b for b in result["bad"] if not b.get("placement")]
+            _msg = "[deep-verify] DONE — "
+            if _corrupt:
+                _msg += ("checksum mismatch on: "
+                         + ", ".join(f"{b['repo']}/{b['file']}" for b in _corrupt)
+                         + ". Use Repair to re-download. ")
+            if _misplaced:
+                _msg += "misplaced file(s): " + "; ".join(b["reason"] for b in _misplaced)
+            push(_msg.strip())
         else:
             uv = len(result.get("unverified") or [])
             push(f"[deep-verify] DONE — all {result['checked']} weight file(s) match upstream"
@@ -4730,6 +5076,883 @@ def h3_status() -> dict:
     }
 
 
+# ---- Anonymous usage analytics ----------------------------------------------
+#
+# History first, because this file has some: an OPT-IN telemetry module
+# shipped 2026-05-21 and was reverted wholesale the next day (da1d6f5) —
+# "not going to be well accepted in the open source world." What ships now
+# is deliberately a different animal, and the differences are the point:
+#
+#   * INERT BY DEFAULT IN THE PUBLIC TREE. ANALYTICS_KEY_DEFAULT is "" and
+#     an empty key is a hard no-op — no socket is ever opened. The panel
+#     starts pinging only after the maintainer pastes a PostHog project key
+#     into Settings (or sets PHOSPHENE_ANALYTICS_KEY). A fork that never
+#     pastes a key never sends anything, forever, with no code change.
+#   * IT NEVER SEES CONTENT. No prompts, no filenames, no paths, no media,
+#     no LoRA/character names, no seeds. The event list in docs/ANALYTICS.md
+#     is the WHOLE schema. _analytics_clean_props() drops known-dangerous
+#     keys and _analytics_scrub_text() strips absolute paths out of the one
+#     free-text field that exists (error_signature) before truncating it.
+#   * IT CANNOT SLOW OR BREAK A RENDER. Every capture returns immediately;
+#     delivery happens on a daemon thread with a 2 s timeout and a bare
+#     `except Exception: pass` around the whole path. That property is the
+#     one this module must never lose — if analytics ever raises into a
+#     render, the bug is here, not in the caller.
+#   * IT IS VISIBLE AND REVERSIBLE. One line in the boot log the first time
+#     it runs, a Settings toggle (default ON), and a plain-text local mirror
+#     at state/usage-log.jsonl showing exactly what this panel would send.
+#
+# Event volume is deliberately tiny: one app_boot per panel start, zero or
+# more pack_state_change at the same moment, and one event per finished job.
+# There are NO heartbeats and NO background timers in this module.
+
+# Empty string = analytics disabled at the source. This constant stays ""
+# in the public tree; the maintainer supplies the real key at runtime via
+# Settings or PHOSPHENE_ANALYTICS_KEY so it is never committed.
+ANALYTICS_KEY_DEFAULT = ""
+# PostHog ingestion host (capture). Override for a self-hosted receiver.
+ANALYTICS_HOST_DEFAULT = "https://us.i.posthog.com"
+# PostHog app host (HogQL query API — different host from ingestion).
+# Only used by the maintainer-only fleet view on /stats/usage.
+ANALYTICS_API_HOST_DEFAULT = "https://us.posthog.com"
+ANALYTICS_TIMEOUT_SEC = 2.0
+ANALYTICS_STR_MAX = 120
+
+# Local mirror. Written for every captured event whether or not a PostHog
+# key is configured, so /stats always has a "this machine" view and so
+# there is an auditable record of what the panel would transmit. Lives in
+# state/ (gitignored, fs.link-preserved across Pinokio Reset) and is capped
+# so a heavy user's log can't grow without bound.
+USAGE_LOG_FILE = STATE_DIR / "usage-log.jsonl"
+USAGE_LOG_MAX_BYTES = 5 * 1024 * 1024
+USAGE_FLEET_CACHE = STATE_DIR / "usage-fleet.json"
+USAGE_FLEET_TTL_SEC = 6 * 60 * 60
+_USAGE_LOG_LOCK = threading.Lock()
+
+# Keys that must never appear in an event payload. This is defense in depth,
+# not the primary control — no call site passes any of these — but a future
+# edit that spreads `**params` into a props dict would otherwise leak the
+# user's prompt to a server. _analytics_clean_props() drops them by name.
+_ANALYTICS_FORBIDDEN_KEYS = frozenset({
+    "prompt", "negative_prompt", "override_prompt", "caption",
+    "image", "image_path", "images", "audio", "audio_path", "video",
+    "output", "output_path", "raw_output", "native_output", "path", "paths",
+    "file", "filename", "files", "dir", "directory", "root",
+    "first_frame", "last_frame", "refs", "reference", "seed_image",
+    "lora", "loras", "lora_path", "lora_paths", "character", "trigger",
+    "trigger_words", "hostname", "username", "user", "email", "home",
+    "command", "cmd", "argv", "env", "token", "key", "api_key",
+})
+
+# Absolute-path shapes to redact from error signatures. Applied in order:
+# the anchored pass catches the macOS roots a Phosphene error is likely to
+# quote, the generic pass catches anything else with 2+ path segments.
+_ANALYTICS_PATH_RES = (
+    re.compile(r"(?:~|/(?:Users|home|private|var|tmp|opt|Volumes|Applications"
+               r"|Library|System))(?:/[^\s'\"<>,;)\]]*)*"),
+    re.compile(r"(?:/[\w.+\-]+){2,}/?"),
+)
+_ANALYTICS_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _settings_set_internal(**kv) -> None:
+    """Persist panel-internal settings keys that never come from a form.
+
+    `update_settings()` runs the user-input whitelist, which by design
+    rejects anything not in it. Analytics bookkeeping (`install_id`, the
+    last-known pack snapshot, the one-time disclosure flag) is written by
+    the panel itself, so it goes straight to the store. Fail-silent: losing
+    a bookkeeping write costs at most one duplicate boot event."""
+    try:
+        with _SETTINGS_LOCK:
+            _SETTINGS.update(kv)
+            _save_settings(_SETTINGS)
+    except Exception:
+        pass
+
+
+def _analytics_enabled() -> bool:
+    """Master switch. Settings toggle (default ON), with an env kill-switch
+    for users who want it off before the panel ever writes a settings file
+    — PHOSPHENE_ANALYTICS_DISABLED=1 wins over everything.
+
+    Note this is independent of whether a key is configured: with the
+    toggle ON and no key, capture still writes the local mirror (which
+    never leaves the Mac) but opens no socket."""
+    if _optional_bool_env("PHOSPHENE_ANALYTICS_DISABLED") is True:
+        return False
+    return bool(get_settings().get("analytics_enabled", True))
+
+
+def _analytics_key() -> str:
+    """Resolve the PostHog PROJECT key used for capture, in priority order:
+       1. PHOSPHENE_ANALYTICS_KEY env var (maintainer / CI override)
+       2. `analytics_key` in panel_settings.json (Settings modal)
+       3. ANALYTICS_KEY_DEFAULT — "" in the public tree
+    Empty result means "never open a socket"."""
+    env = (os.environ.get("PHOSPHENE_ANALYTICS_KEY") or "").strip()
+    if env:
+        return env
+    saved = str(get_settings().get("analytics_key") or "").strip()
+    return saved or ANALYTICS_KEY_DEFAULT
+
+
+def _analytics_query_key() -> str:
+    """PostHog PERSONAL API key — read-only, maintainer-only, used solely by
+    the fleet view on /stats/usage. Separate from the capture key on
+    purpose: the capture key is write-only and safe to ship in a binary,
+    the personal key can read the whole project and must not be."""
+    env = (os.environ.get("PHOSPHENE_ANALYTICS_QUERY_KEY") or "").strip()
+    if env:
+        return env
+    return str(get_settings().get("analytics_query_key") or "").strip()
+
+
+def _analytics_host() -> str:
+    return (os.environ.get("PHOSPHENE_ANALYTICS_HOST")
+            or ANALYTICS_HOST_DEFAULT).strip().rstrip("/")
+
+
+def _analytics_api_host() -> str:
+    return (os.environ.get("PHOSPHENE_ANALYTICS_API_HOST")
+            or ANALYTICS_API_HOST_DEFAULT).strip().rstrip("/")
+
+
+def _analytics_install_id() -> str:
+    """Random UUID4 generated once and persisted to panel_settings.json.
+
+    This is the ONLY identifier that leaves the machine. It is not derived
+    from anything — not the hardware serial, not the MAC address, not the
+    username, not the install path. Deleting panel_settings.json (or the
+    key) makes this install a brand-new anonymous install with no way to
+    correlate it to the old one.
+
+    A value that isn't a well-formed UUID4 (e.g. the 32-char hex id the
+    reverted 2026-05 module wrote) is discarded and regenerated."""
+    cur = str(get_settings().get("analytics_install_id") or "").strip().lower()
+    if _ANALYTICS_UUID_RE.match(cur):
+        return cur
+    import uuid as _uuid
+    new = str(_uuid.uuid4())
+    _settings_set_internal(analytics_install_id=new)
+    return new
+
+
+def _analytics_scrub_text(text, secrets=()) -> str:
+    """Reduce free text to a safe one-line signature.
+
+    Order matters. Exact user strings (this job's prompt, its image path)
+    are redacted FIRST — an exception message that quotes the prompt is the
+    realistic leak, and exact-substring removal is the only defense that
+    provably catches it. Then absolute paths, then whitespace collapse,
+    then a hard truncation. Returns "" for anything unusable."""
+    try:
+        s = str(text or "").strip()
+        if not s:
+            return ""
+        s = s.splitlines()[0]
+        for secret in secrets or ():
+            sec = str(secret or "").strip()
+            # 6 chars is short enough to catch a terse prompt and long
+            # enough not to blank out ordinary words in an error string.
+            if len(sec) >= 6 and sec in s:
+                s = s.replace(sec, "<redacted>")
+        for rx in _ANALYTICS_PATH_RES:
+            s = rx.sub("<path>", s)
+        s = " ".join(s.split())
+        return s[:ANALYTICS_STR_MAX]
+    except Exception:
+        return ""
+
+
+def _analytics_clean_props(props: dict) -> dict:
+    """Whitelist-by-shape pass over an outgoing property dict.
+
+    Drops forbidden keys outright, keeps only JSON primitives (plus a
+    single level of flat dict, which `packs` needs), and truncates every
+    string. Anything unexpected is dropped rather than coerced — a prop we
+    can't reason about is a prop we don't send."""
+    out: dict = {}
+    for key, val in (props or {}).items():
+        k = str(key)
+        if k.lower() in _ANALYTICS_FORBIDDEN_KEYS:
+            continue
+        if isinstance(val, bool) or isinstance(val, int) or isinstance(val, float):
+            out[k] = val
+        elif isinstance(val, str):
+            out[k] = val[:ANALYTICS_STR_MAX]
+        elif val is None:
+            out[k] = None
+        elif isinstance(val, dict):
+            flat = {}
+            for sk, sv in val.items():
+                if str(sk).lower() in _ANALYTICS_FORBIDDEN_KEYS:
+                    continue
+                if isinstance(sv, (bool, int, float)) or sv is None:
+                    flat[str(sk)] = sv
+                elif isinstance(sv, str):
+                    flat[str(sk)] = sv[:ANALYTICS_STR_MAX]
+            out[k] = flat
+    return out
+
+
+def _analytics_duration_bucket(seconds) -> str:
+    """Bucket an elapsed time. Buckets, not raw seconds, because a raw
+    duration plus a resolution plus a timestamp starts to look like a
+    fingerprint; the buckets answer the only question we actually have
+    ("is this tier usable on real hardware?") without that risk."""
+    try:
+        s = float(seconds or 0)
+    except (TypeError, ValueError):
+        return "unknown"
+    if s <= 0:
+        return "unknown"
+    if s < 120:
+        return "<2m"
+    if s < 300:
+        return "2-5m"
+    if s < 900:
+        return "5-15m"
+    if s < 2400:
+        return "15-40m"
+    return ">40m"
+
+
+def _analytics_os_version() -> str:
+    """macOS version as major.minor ("26.4"). Patch level is dropped — it
+    adds no signal and narrows the anonymity set."""
+    try:
+        import platform as _platform
+        ver = (_platform.mac_ver()[0] or "").strip()
+        if not ver:
+            return "unknown"
+        return ".".join(ver.split(".")[:2])
+    except Exception:
+        return "unknown"
+
+
+_CHIP_FAMILY_CACHE: str | None = None
+_CHIP_FAMILY_RE = re.compile(r"\bM(\d+)\s*(Pro|Max|Ultra)?\b", re.IGNORECASE)
+
+
+def _analytics_chip_family() -> str:
+    """Chip class from the CPU brand string: 'Apple M4 Max' -> 'M4 Max'.
+
+    This is a hardware CLASS, not a hardware ID — every M4 Max on earth
+    reports the same string. It is the field that answers "does this
+    feature work on the machines people actually own?", which is the
+    question that made the H3 tier table honest."""
+    global _CHIP_FAMILY_CACHE
+    if _CHIP_FAMILY_CACHE is not None:
+        return _CHIP_FAMILY_CACHE
+    family = "unknown"
+    try:
+        brand = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        m = _CHIP_FAMILY_RE.search(brand)
+        if m:
+            family = f"M{m.group(1)}" + (f" {m.group(2).title()}" if m.group(2) else "")
+        elif brand:
+            family = "non-apple-silicon"
+    except Exception:
+        pass
+    _CHIP_FAMILY_CACHE = family
+    return family
+
+
+def _qwen_pack_available() -> bool:
+    """Whether the optional Qwen image pack's mflux binary is installed.
+    Same probe the /agent/image/config endpoint uses for its family pills."""
+    try:
+        probe = agent_image_engine.ImageEngineConfig(
+            kind="mflux", mflux_family="qwen_edit")
+        return bool(agent_image_engine._resolve_mflux_bin(probe))
+    except Exception:
+        return False
+
+
+def _analytics_pack_state() -> dict:
+    """Current install state of the four optional packs. Booleans only.
+
+    Diffed against the previous boot's snapshot to emit pack_state_change.
+    A true->false transition is the 'my H3 vanished' bug class: the pack
+    was installed, then a panel Update / Pinokio Reset / venv breakage made
+    it undetectable. Nothing in the panel notices that today; this does."""
+    return {
+        "h3": bool(h3_available()),
+        "sharp": bool(PIPERSR_UPSCALE_ENABLED),
+        "q8": bool(q8_available_anywhere()),
+        "qwen": bool(_qwen_pack_available()),
+    }
+
+
+def _usage_log_rotate() -> None:
+    """Halve the local mirror when it hits the cap. Keeps the NEWEST half —
+    the dashboard's windows are all 7/14-day, so old lines have no readers.
+    Rewrites in place via the same temp+replace shape the rest of the panel
+    uses so a kill mid-rotate can't truncate the log to nothing."""
+    try:
+        lines = USAGE_LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    keep = lines[len(lines) // 2:]
+    tmp = USAGE_LOG_FILE.with_name(f".{USAGE_LOG_FILE.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text("\n".join(keep) + ("\n" if keep else ""), encoding="utf-8")
+        os.replace(tmp, USAGE_LOG_FILE)
+    except OSError:
+        try: tmp.unlink()
+        except OSError: pass
+
+
+def _usage_log_append(record: dict) -> None:
+    """Append one JSON line to the local mirror. Never raises."""
+    try:
+        _ensure_state_dir()
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        with _USAGE_LOG_LOCK:
+            try:
+                if USAGE_LOG_FILE.stat().st_size + len(line) > USAGE_LOG_MAX_BYTES:
+                    _usage_log_rotate()
+            except OSError:
+                pass  # missing file is the normal first-write case
+            with USAGE_LOG_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+    except Exception:
+        pass
+
+
+def _analytics_post(payload: dict) -> None:
+    """Single-event POST to the PostHog capture API. Never raises.
+
+    `$process_person_profile: false` tells PostHog not to build a person
+    record for the install id — we want counts, not people. The IP the
+    request arrives from is whatever the backend sees; PostHog derives a
+    coarse country from it by default and we neither add to nor suppress
+    that (documented in docs/ANALYTICS.md)."""
+    key = _analytics_key()
+    if not key:
+        return  # no key => inert, and this is the only guard that matters
+    body = json.dumps({
+        "api_key": key,
+        "event": payload["event"],
+        "distinct_id": payload["install_id"],
+        "timestamp": payload["utc"],
+        "properties": {
+            **payload["props"],
+            "$process_person_profile": False,
+        },
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{_analytics_host()}/i/v0/e/",
+        data=body,
+        headers={"Content-Type": "application/json",
+                 "User-Agent": "phosphene-panel-analytics"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=ANALYTICS_TIMEOUT_SEC) as resp:
+        resp.read(256)   # drain so the socket closes cleanly; body unused
+
+
+def _analytics_deliver(payload: dict) -> None:
+    """Thread body: mirror locally, then try the network. Fail-silent.
+
+    The local write happens FIRST and unconditionally, so a dead endpoint
+    or an absent key still leaves the maintainer a complete record on this
+    machine. Nothing here is retried — a dropped event is strictly
+    preferable to a queue that outlives the render it describes."""
+    try:
+        _usage_log_append(payload)
+    except Exception:
+        pass
+    try:
+        _analytics_post(payload)
+    except Exception:
+        pass   # network down, endpoint 500, bad key, offline Mac — all fine
+
+
+def _analytics_capture(event: str, props: dict | None = None) -> None:
+    """Record one event. Returns immediately; never raises; never blocks.
+
+    This is the only entry point call sites should use. Everything after
+    the thread start is best-effort by design — see the module note above
+    for why that contract is non-negotiable."""
+    try:
+        if not _analytics_enabled():
+            return
+        payload = {
+            "event": str(event)[:64],
+            "props": _analytics_clean_props(props or {}),
+            "install_id": _analytics_install_id(),
+            "ts": time.time(),
+            "at": iso_now(),
+            "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    except Exception:
+        return
+    try:
+        threading.Thread(target=_analytics_deliver, args=(payload,),
+                         name="analytics-capture", daemon=True).start()
+    except Exception:
+        pass
+
+
+def _analytics_disclose_once() -> None:
+    """One line, once per install, in the boot log. Users find out that the
+    panel does this from the panel itself — not from a docs page they'd
+    have to go looking for. ASCII only (emoji in panel stdout can break the
+    Pinokio/helper handshake — see 2026-06-02)."""
+    if get_settings().get("analytics_disclosed"):
+        return
+    print(
+        "Phosphene sends anonymous usage counts (version, hardware class, "
+        "render stats, error signatures - never your prompts or media). "
+        "Disable in Settings.",
+        flush=True,
+    )
+    _settings_set_internal(analytics_disclosed=True)
+
+
+def _analytics_boot() -> None:
+    """Emit app_boot plus any pack transitions since the previous boot.
+
+    Called once from __main__ — never at import time, so `import
+    mlx_ltx_panel` from a test or a script sends nothing."""
+    try:
+        if not _analytics_enabled():
+            return
+        _analytics_disclose_once()
+        packs = _analytics_pack_state()
+        _analytics_capture("app_boot", {
+            "version": _read_local_version() or "unknown",
+            "os_version": _analytics_os_version(),
+            "chip_family": _analytics_chip_family(),
+            "ram_gb": int(round(SYSTEM_RAM_GB)),
+            "cap_tier": _resolve_cap_tier(),
+            "packs": packs,
+            "h3_chain_supported": bool(packs["h3"] and h3_supports_chain()),
+        })
+        prev = get_settings().get("analytics_last_packs")
+        if isinstance(prev, dict):
+            for name in sorted(packs):
+                was = prev.get(name)
+                if isinstance(was, bool) and was != packs[name]:
+                    _analytics_capture("pack_state_change", {
+                        "pack": name, "from": was, "to": packs[name],
+                    })
+        _settings_set_internal(analytics_last_packs=packs)
+    except Exception:
+        pass
+
+
+def _analytics_job_secrets(job: dict) -> list:
+    """Exact strings from this job that must never survive into an error
+    signature. Collected from the job itself so the redaction is exact
+    rather than heuristic — see _analytics_scrub_text()."""
+    p = (job or {}).get("params") or {}
+    out = []
+    for k in ("prompt", "negative_prompt", "image", "audio", "output",
+              "first_frame", "last_frame", "character", "train_job_id"):
+        v = p.get(k)
+        if isinstance(v, str) and v.strip():
+            out.append(v.strip())
+    for k in ("output", "error_path"):
+        v = (job or {}).get(k)
+        if isinstance(v, str) and v.strip():
+            out.append(v.strip())
+    return out
+
+
+def _analytics_render_tier(params: dict, engine: str) -> str:
+    """The user-facing quality/tier selector for this job, per engine.
+    LTX calls it `quality` (quick/balanced/standard/high); H3 calls it
+    `h3_tier` (3s/5s/10s/15s). One field in the event, either way."""
+    if engine == "h3":
+        return str(params.get("h3_tier") or "unknown")
+    return str(params.get("quality") or params.get("mode") or "unknown")
+
+
+def _analytics_render_event(job: dict) -> None:
+    """Emit render_completed / render_failed for a finished queue job.
+
+    Wired at the single point in worker_loop's `finally` where every job
+    from every engine lands, so LTX, H3, image and training jobs are all
+    covered by one call and a future engine gets counted for free.
+    Cancelled jobs are deliberately not reported (a user cancelling is not
+    a signal about the software)."""
+    try:
+        status = (job or {}).get("status")
+        if status not in ("done", "failed"):
+            return
+        p = (job or {}).get("params") or {}
+        engine = str(p.get("engine") or "ltx").strip().lower()
+        try:
+            width, height = int(p.get("width") or 0), int(p.get("height") or 0)
+        except (TypeError, ValueError):
+            width = height = 0
+        try:
+            frames = int(p.get("frames") or 0)
+        except (TypeError, ValueError):
+            frames = 0
+        props = {
+            "engine": engine,
+            "mode": str(p.get("mode") or "unknown"),
+            "tier": _analytics_render_tier(p, engine),
+            "duration_bucket": _analytics_duration_bucket(job.get("elapsed_sec")),
+            "resolution": f"{width}x{height}" if width and height else "unknown",
+            "frames": frames,
+        }
+        if status == "failed":
+            props["error_signature"] = _analytics_scrub_text(
+                job.get("error"), _analytics_job_secrets(job))
+        _analytics_capture(
+            "render_completed" if status == "done" else "render_failed", props)
+    except Exception:
+        pass
+
+
+# ---- Usage report: local aggregates + optional fleet view -------------------
+#
+# Feeds the "Usage" section of the maintainer dashboard at /stats, the same
+# way the GitHub sections are fed by scripts/fetch_repo_stats.py. Two tiers,
+# and the dashboard renders whichever it gets:
+#
+#   LOCAL  — aggregated from state/usage-log.jsonl, i.e. this Mac only.
+#            Always available, needs no keys, works offline. This is also
+#            the debugging view for the fleet pings: whatever the panel
+#            would have sent is sitting in that file in plain text.
+#   FLEET  — aggregated by PostHog over every install that has pinged,
+#            via the HogQL query API. Requires a PostHog PERSONAL API key
+#            (Settings -> analytics_query_key), which is read-only and
+#            maintainer-only. Cached to state/usage-fleet.json for 6 h so
+#            an open dashboard tab can't hammer the query API.
+#
+# Both endpoints are 127.0.0.1-only via the early _is_local_request guard,
+# like everything else on this server.
+
+_USAGE_FLEET_LOCK = threading.Lock()
+
+
+def _usage_log_read(max_age_days: float | None = None) -> list[dict]:
+    """Parse the local mirror. Bad lines are skipped, not fatal — this file
+    is append-only from several threads and a torn last line is possible."""
+    out: list[dict] = []
+    try:
+        raw = USAGE_LOG_FILE.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    cutoff = (time.time() - max_age_days * 86400) if max_age_days else None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(rec, dict) or "event" not in rec:
+            continue
+        if cutoff is not None:
+            try:
+                if float(rec.get("ts") or 0) < cutoff:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        out.append(rec)
+    return out
+
+
+def _usage_rank(counter: dict, key_name: str, limit: int = 12) -> list[dict]:
+    """{value: count} -> sorted [{<key_name>: value, "count": n}] rows."""
+    rows = sorted(counter.items(), key=lambda kv: (-kv[1], str(kv[0])))
+    return [{key_name: k, "count": v} for k, v in rows[:limit]]
+
+
+def _usage_local_report() -> dict:
+    """Aggregate the local mirror into the dashboard's payload shape.
+
+    Deliberately the SAME shape the fleet path produces, so stats.html has
+    exactly one renderer and the only difference the user sees is the
+    `source` label and the note above the tiles."""
+    recs = _usage_log_read()
+    now = time.time()
+    d7, d14 = now - 7 * 86400, now - 14 * 86400
+
+    boots_by_day: dict[str, int] = {}
+    engines: dict[str, int] = {}
+    errors: dict[str, int] = {}
+    versions: dict[str, int] = {}
+    chips: dict[str, int] = {}
+    rams: dict[str, int] = {}
+    flips: dict[tuple, int] = {}
+    renders_7d = ok_14d = fail_14d = 0
+    h3_14d = tot_14d = 0
+    active_7d = False
+
+    for rec in recs:
+        try:
+            ts = float(rec.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        ev = str(rec.get("event") or "")
+        props = rec.get("props") if isinstance(rec.get("props"), dict) else {}
+        if ts >= d7:
+            active_7d = True
+        if ev == "app_boot":
+            if ts >= d14:
+                day = time.strftime("%Y-%m-%d", time.localtime(ts))
+                boots_by_day[day] = boots_by_day.get(day, 0) + 1
+                versions[str(props.get("version") or "unknown")] = \
+                    versions.get(str(props.get("version") or "unknown"), 0) + 1
+                chips[str(props.get("chip_family") or "unknown")] = \
+                    chips.get(str(props.get("chip_family") or "unknown"), 0) + 1
+                ram_key = str(props.get("ram_gb") or "unknown")
+                rams[ram_key] = rams.get(ram_key, 0) + 1
+        elif ev in ("render_completed", "render_failed"):
+            if ts >= d7:
+                renders_7d += 1
+            if ts >= d14:
+                tot_14d += 1
+                eng = str(props.get("engine") or "unknown")
+                engines[eng] = engines.get(eng, 0) + 1
+                if eng == "h3":
+                    h3_14d += 1
+                if ev == "render_completed":
+                    ok_14d += 1
+                else:
+                    fail_14d += 1
+            if ev == "render_failed" and ts >= d7:
+                sig = str(props.get("error_signature") or "unknown error")
+                errors[sig] = errors.get(sig, 0) + 1
+        elif ev == "pack_state_change" and ts >= d7:
+            k = (str(props.get("pack") or "?"),
+                 bool(props.get("from")), bool(props.get("to")))
+            flips[k] = flips.get(k, 0) + 1
+
+    flip_rows = [{"pack": p, "from": f, "to": t, "count": c}
+                 for (p, f, t), c in sorted(flips.items(), key=lambda kv: -kv[1])]
+    h3_lost = sum(r["count"] for r in flip_rows
+                  if r["pack"] == "h3" and r["from"] and not r["to"])
+
+    return {
+        "ok": True,
+        "source": "local",
+        "generated_at": iso_now(),
+        "cached": False,
+        "note": ("this machine only - add a PostHog query key in Settings "
+                 "for fleet data"),
+        "tiles": {
+            "weekly_active_installs": 1 if active_7d else 0,
+            "renders_7d": renders_7d,
+            "h3_share_pct": round(100.0 * h3_14d / tot_14d, 1) if tot_14d else None,
+            "error_rate_pct": (round(100.0 * fail_14d / (ok_14d + fail_14d), 1)
+                               if (ok_14d + fail_14d) else None),
+        },
+        "boots_by_day": [{"date": d, "count": boots_by_day[d]}
+                         for d in sorted(boots_by_day)],
+        "engines": _usage_rank(engines, "engine", 8),
+        "top_errors": [{"signature": k, "count": v} for k, v in
+                       sorted(errors.items(), key=lambda kv: (-kv[1], kv[0]))[:5]],
+        "versions": _usage_rank(versions, "version"),
+        "chips": _usage_rank(chips, "chip"),
+        "ram": _usage_rank(rams, "ram_gb"),
+        "pack_flips": {"h3_lost": h3_lost, "rows": flip_rows},
+        "events_logged": len(recs),
+    }
+
+
+# HogQL fragments for the fleet view. Kept as a table (not inline strings)
+# so the whole surface the personal API key touches is auditable in one
+# place: eight read-only aggregate SELECTs over `events`, nothing else.
+# `properties['x']` bracket form throughout — `properties.from` would
+# collide with the SQL keyword in the pack_state_change query.
+_USAGE_FLEET_QUERIES = {
+    "wau": "SELECT count(DISTINCT distinct_id) FROM events "
+           "WHERE event = 'app_boot' AND timestamp > now() - INTERVAL 7 DAY",
+    "dau": "SELECT count(DISTINCT distinct_id) FROM events "
+           "WHERE event = 'app_boot' AND timestamp > now() - INTERVAL 1 DAY",
+    "boots_by_day":
+        "SELECT toDate(timestamp) AS d, count() AS c FROM events "
+        "WHERE event = 'app_boot' AND timestamp > now() - INTERVAL 14 DAY "
+        "GROUP BY d ORDER BY d",
+    "engines":
+        "SELECT properties['engine'] AS e, count() AS c FROM events "
+        "WHERE event IN ('render_completed', 'render_failed') "
+        "AND timestamp > now() - INTERVAL 14 DAY GROUP BY e ORDER BY c DESC",
+    "outcomes":
+        "SELECT event, count() AS c FROM events "
+        "WHERE event IN ('render_completed', 'render_failed') "
+        "AND timestamp > now() - INTERVAL 14 DAY GROUP BY event",
+    "top_errors":
+        "SELECT properties['error_signature'] AS sig, count() AS c FROM events "
+        "WHERE event = 'render_failed' AND timestamp > now() - INTERVAL 7 DAY "
+        "GROUP BY sig ORDER BY c DESC LIMIT 5",
+    "versions":
+        "SELECT properties['version'] AS v, count(DISTINCT distinct_id) AS c "
+        "FROM events WHERE event = 'app_boot' "
+        "AND timestamp > now() - INTERVAL 14 DAY GROUP BY v ORDER BY c DESC LIMIT 12",
+    "chips":
+        "SELECT properties['chip_family'] AS chip, count(DISTINCT distinct_id) AS c "
+        "FROM events WHERE event = 'app_boot' "
+        "AND timestamp > now() - INTERVAL 14 DAY GROUP BY chip ORDER BY c DESC LIMIT 12",
+    "ram":
+        "SELECT properties['ram_gb'] AS ram, count(DISTINCT distinct_id) AS c "
+        "FROM events WHERE event = 'app_boot' "
+        "AND timestamp > now() - INTERVAL 14 DAY GROUP BY ram ORDER BY c DESC LIMIT 12",
+    "pack_flips":
+        "SELECT properties['pack'] AS pack, properties['from'] AS was, "
+        "properties['to'] AS now_, count() AS c FROM events "
+        "WHERE event = 'pack_state_change' AND timestamp > now() - INTERVAL 7 DAY "
+        "GROUP BY pack, was, now_ ORDER BY c DESC",
+}
+
+
+def _usage_fleet_query_one(hogql: str, key: str) -> list:
+    """Run one HogQL query. Returns the `results` rows, or [] on any error.
+
+    10 s timeout (not the 2 s capture timeout — this is a human waiting on a
+    dashboard, not a render path). Raises nothing; the caller treats an
+    empty result as "this panel of the dashboard has no data"."""
+    body = json.dumps({"query": {"kind": "HogQLQuery", "query": hogql}}).encode("utf-8")
+    project = (os.environ.get("PHOSPHENE_ANALYTICS_PROJECT") or "@current").strip()
+    req = urllib.request.Request(
+        f"{_analytics_api_host()}/api/projects/{quote(project)}/query/",
+        data=body,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}",
+                 "User-Agent": "phosphene-panel-stats"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+    rows = data.get("results")
+    return rows if isinstance(rows, list) else []
+
+
+def _usage_fleet_report() -> dict | None:
+    """Build the fleet payload, or None when no query key is configured.
+
+    Every sub-query is independent: one failing (rate limit, schema drift,
+    a property that no install has sent yet) leaves that panel empty rather
+    than collapsing the whole view back to local. If EVERY query fails we
+    return None so the caller falls back to local with a warning."""
+    key = _analytics_query_key()
+    if not key:
+        return None
+    res: dict[str, list] = {}
+    failures = 0
+    for name, hogql in _USAGE_FLEET_QUERIES.items():
+        try:
+            res[name] = _usage_fleet_query_one(hogql, key)
+        except Exception:
+            res[name] = []
+            failures += 1
+    if failures == len(_USAGE_FLEET_QUERIES):
+        return None
+
+    def _scalar(name):
+        rows = res.get(name) or []
+        try:
+            return rows[0][0]
+        except (IndexError, TypeError):
+            return None
+
+    outcomes = {str(r[0]): int(r[1]) for r in (res.get("outcomes") or [])
+                if isinstance(r, (list, tuple)) and len(r) >= 2}
+    ok_n = outcomes.get("render_completed", 0)
+    fail_n = outcomes.get("render_failed", 0)
+    engines = [{"engine": str(r[0] or "unknown"), "count": int(r[1])}
+               for r in (res.get("engines") or [])
+               if isinstance(r, (list, tuple)) and len(r) >= 2]
+    tot = sum(e["count"] for e in engines)
+    h3 = sum(e["count"] for e in engines if e["engine"] == "h3")
+
+    flip_rows = []
+    for r in (res.get("pack_flips") or []):
+        if not (isinstance(r, (list, tuple)) and len(r) >= 4):
+            continue
+        flip_rows.append({
+            "pack": str(r[0] or "?"),
+            "from": str(r[1]).lower() in ("true", "1"),
+            "to": str(r[2]).lower() in ("true", "1"),
+            "count": int(r[3]),
+        })
+    h3_lost = sum(r["count"] for r in flip_rows
+                  if r["pack"] == "h3" and r["from"] and not r["to"])
+
+    return {
+        "ok": True,
+        "source": "fleet",
+        "generated_at": iso_now(),
+        "cached": False,
+        "note": "",
+        "partial": failures > 0,
+        "tiles": {
+            "weekly_active_installs": _scalar("wau"),
+            "daily_active_installs": _scalar("dau"),
+            "renders_7d": ok_n + fail_n,
+            "h3_share_pct": round(100.0 * h3 / tot, 1) if tot else None,
+            "error_rate_pct": (round(100.0 * fail_n / (ok_n + fail_n), 1)
+                               if (ok_n + fail_n) else None),
+        },
+        "boots_by_day": [{"date": str(r[0]), "count": int(r[1])}
+                         for r in (res.get("boots_by_day") or [])
+                         if isinstance(r, (list, tuple)) and len(r) >= 2],
+        "engines": engines,
+        "top_errors": [{"signature": str(r[0] or "unknown error"), "count": int(r[1])}
+                       for r in (res.get("top_errors") or [])
+                       if isinstance(r, (list, tuple)) and len(r) >= 2],
+        "versions": [{"version": str(r[0] or "unknown"), "count": int(r[1])}
+                     for r in (res.get("versions") or [])
+                     if isinstance(r, (list, tuple)) and len(r) >= 2],
+        "chips": [{"chip": str(r[0] or "unknown"), "count": int(r[1])}
+                  for r in (res.get("chips") or [])
+                  if isinstance(r, (list, tuple)) and len(r) >= 2],
+        "ram": [{"ram_gb": str(r[0] or "unknown"), "count": int(r[1])}
+                for r in (res.get("ram") or [])
+                if isinstance(r, (list, tuple)) and len(r) >= 2],
+        "pack_flips": {"h3_lost": h3_lost, "rows": flip_rows},
+    }
+
+
+def _usage_report(force: bool = False) -> dict:
+    """What GET /stats/usage returns. Fleet when a query key is configured
+    and the 6 h cache is stale; otherwise the cache; otherwise local."""
+    with _USAGE_FLEET_LOCK:
+        if _analytics_query_key():
+            if not force:
+                try:
+                    cached = json.loads(USAGE_FLEET_CACHE.read_text(encoding="utf-8"))
+                    if (time.time() - float(cached.get("_fetched_at") or 0)
+                            < USAGE_FLEET_TTL_SEC):
+                        cached["cached"] = True
+                        return cached
+                except (OSError, ValueError, json.JSONDecodeError):
+                    pass
+            fleet = None
+            try:
+                fleet = _usage_fleet_report()
+            except Exception:
+                fleet = None
+            if fleet:
+                fleet["_fetched_at"] = time.time()
+                try:
+                    _ensure_state_dir()
+                    atomic_write_text(USAGE_FLEET_CACHE,
+                                      json.dumps(fleet, indent=2))
+                except Exception:
+                    pass
+                return fleet
+            local = _usage_local_report()
+            local["warning"] = ("PostHog query failed - showing this machine "
+                                "only. Check the personal API key in Settings.")
+            return local
+    return _usage_local_report()
+
+
 def _scale_dims_to_max(width: int, height: int, max_dim: int,
                        *, align: int = 32) -> tuple[int, int]:
     """Scale dimensions down to max_dim while preserving aspect and alignment."""
@@ -4974,6 +6197,62 @@ def _probe_video_dims(path: str) -> tuple[int, int]:
     return 0, 0
 
 
+def _native_render_for(src: Path) -> Path:
+    """The un-exported render behind `src`, when there is one.
+
+    Every export pass (`fit_720p`, `fit_1080p`, `x2`, the H3 export) writes
+    `<stem>_<tag>.mp4` NEXT TO the native render, hides the native from the
+    gallery via `set_hidden`, and records the pair in the exported file's
+    sidecar as `native_output`. The gallery therefore only ever OFFERS the
+    export — so every surface that feeds a clip back into a model was
+    silently consuming a lanczos-resampled, re-encoded, sometimes
+    black-bar-padded copy instead of the pixels the model actually made.
+
+    Concretely, on a 1024×576 render exported to 720p and then extended:
+    1024×576 (native) → 1280×720 (upscale + H.264 re-encode) → 768×416
+    (Extend's own downscale + another re-encode). Two full-frame resamples
+    and two lossy generations before the VAE ever sees a pixel, and the
+    letterbox bars an export can add become content the model is asked to
+    continue. Resolving back to the native skips the entire round-trip.
+
+    Returns the native file when the sidecar names one and it is still on
+    disk; otherwise `src` unchanged (own-render sidecars point at
+    themselves, which this treats as "no native to resolve")."""
+    try:
+        sidecar = src.with_suffix(src.suffix + ".json")
+        if not sidecar.is_file():
+            return src
+        data = json.loads(sidecar.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):      # ValueError covers JSONDecodeError
+        return src
+    if not isinstance(data, dict):
+        return src
+    # Compare RESOLVED paths: a sidecar stores absolute paths while the
+    # caller may hold a relative one, and `Path("a/b") != Path("/x/a/b")`
+    # even when they are the same file. Without this an own-render sidecar
+    # (`raw_output` == itself) would look like a different, better source
+    # and we'd log a confusing "using the native render X instead of the
+    # export X".
+    try:
+        src_key = src.resolve()
+    except OSError:
+        src_key = src
+    for key in ("native_output", "raw_output"):
+        cand = data.get(key)
+        if not cand:
+            continue
+        try:
+            cand_path = Path(str(cand))
+            if not (cand_path.is_file() and cand_path.stat().st_size > 1024):
+                continue
+            if cand_path.resolve() == src_key:
+                continue
+            return cand_path
+        except OSError:
+            continue
+    return src
+
+
 def _ensure_downscaled(src: Path, max_dim: int = 768, align: int = 32) -> Path:
     """If `src` has its longer side > max_dim, write a downscaled lossless
     copy alongside it and return that. Cached on disk by target dimensions
@@ -4983,7 +6262,17 @@ def _ensure_downscaled(src: Path, max_dim: int = 768, align: int = 32) -> Path:
     source's native resolution. On 64 GB Macs, 1280×704 + dev transformer
     + CFG-style guided denoising peaks past ~50 GB resident and pushes
     8-12 GB into swap, making each step take 4 minutes instead of 25
-    seconds. Pre-downscaling to ≤768 max-side fits cleanly in RAM."""
+    seconds. Pre-downscaling to ≤768 max-side fits cleanly in RAM.
+
+    ASPECT (fixed 2026-08): both target dimensions are floored to a
+    multiple of `align` INDEPENDENTLY, so the aligned box almost never
+    carries the source's aspect ratio — 1280×720 (1.778) lands on 768×416
+    (1.846). The filter used to be a bare `scale=W:H`, which forces those
+    dimensions and therefore squashed every frame ~3.9% vertically before
+    the model saw it. Scale-to-cover + centre-crop keeps the geometry
+    exact instead, at the cost of ≤31 px trimmed on one axis. Crop rather
+    than pad on purpose: pillar/letterbox bars would become in-frame
+    content that the model is then asked to continue."""
     src_w, src_h = _probe_video_dims(str(src))
     if not src_w or not src_h or max(src_w, src_h) <= max_dim:
         return src
@@ -5003,7 +6292,9 @@ def _ensure_downscaled(src: Path, max_dim: int = 768, align: int = 32) -> Path:
     # dies at downscale time. Was silent for a while because Extend wasn't
     # exercised after the .partial rename was added.
     cmd = [str(FFMPEG), "-y", "-i", str(src),
-           "-vf", f"scale={new_w}:{new_h}",
+           "-vf", (f"scale={new_w}:{new_h}:force_original_aspect_ratio=increase"
+                   f":flags=lanczos:force_divisible_by=2,"
+                   f"crop={new_w}:{new_h}"),
            "-c:v", "libx264", "-pix_fmt", "yuv444p", "-crf", "0", "-preset", "veryfast",
            "-c:a", "copy",   # don't re-encode audio — extend doesn't need it transformed
            "-f", "mp4",
@@ -5481,6 +6772,14 @@ class WarmHelper:
         # just log it loudly on a mismatch. Makes healthy remote bug reports
         # carry the version that's actually running.
         self.ready_info: dict = {}
+        # Gemma prompt-encode fallback state (#44). `gemma_max_length` is
+        # sticky for the whole panel boot once a Metal GPU-watchdog timeout
+        # has been observed — every helper spawned afterwards encodes at the
+        # shorter padded length, so the crash happens at most once per boot.
+        # The two flags are per-run and reset at the top of _run_once().
+        self.gemma_max_length: int | None = None
+        self._metal_timeout_seen = False
+        self._past_prompt_encode = False
 
     def _ensure(self) -> None:
         with self.lock:
@@ -5519,6 +6818,24 @@ class WarmHelper:
             _civ = _active_civitai_key()
             if _civ:
                 env["CIVITAI_API_KEY"] = _civ
+            # Gemma prompt-encode fallback (#44) — sticky once a Metal GPU
+            # watchdog timeout has been seen this boot. Upstream reads
+            # LTX2_GEMMA_MAX_LENGTH inside PromptEncoder.encode
+            # (ltx_pipelines_mlx/utils/blocks.py) and defaults to 1024, so
+            # setting it here is the whole mechanism — no patching needed.
+            # A value the user pinned themselves is only overridden when
+            # ours is smaller (they asked for a cap; we may need a tighter
+            # one, but we never loosen theirs).
+            if self.gemma_max_length is not None:
+                try:
+                    _pinned = int(env.get("LTX2_GEMMA_MAX_LENGTH", "") or 0)
+                except ValueError:
+                    _pinned = 0
+                if _pinned <= 0 or self.gemma_max_length < _pinned:
+                    env["LTX2_GEMMA_MAX_LENGTH"] = str(self.gemma_max_length)
+                    push(f"[gemma-fallback] encoding prompts at "
+                         f"{self.gemma_max_length} tokens for the rest of this "
+                         f"session (Metal GPU watchdog seen on this machine)")
             push(f"Spawning warm helper (low_memory={HELPER_LOW_MEMORY}, idle_timeout={HELPER_IDLE_TIMEOUT}s)")
             self.proc = subprocess.Popen(
                 [str(HELPER_PYTHON), str(HELPER_SCRIPT)],
@@ -5638,6 +6955,7 @@ class WarmHelper:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 push(line)
+                self._sniff_helper_line(line)
                 if log_hook is not None:
                     try: log_hook(line)
                     except Exception: pass
@@ -5646,6 +6964,7 @@ class WarmHelper:
             if ev_type == "log":
                 log_line = ev.get("line", "")
                 push(log_line)
+                self._sniff_helper_line(log_line)
                 if log_hook is not None:
                     try: log_hook(log_line)
                     except Exception: pass
@@ -5750,7 +7069,97 @@ class WarmHelper:
 
         return log_hook, panic_check
 
+    # ---- Gemma prompt-encode watchdog fallback (#44) ---------------------
+    #
+    # 2026-08 (#44, @BobDixon58, M1 Max 32 GB): every render died in
+    # `[Encoding prompt]` with
+    #   [METAL] Command buffer execution failed: Caused GPU Timeout Error
+    #   (00000002:kIOGPUCommandBufferCallbackErrorTimeout)
+    # MLX raises that from the Metal completion-queue thread as an uncaught
+    # C++ exception, so it lands as SIGABRT — the helper process is GONE and
+    # no try/except inside it can ever catch this. The panel is the only
+    # place left that can react, which is why the recovery lives here.
+    #
+    # The lever is the padded sequence length Gemma encodes at. Upstream's
+    # PromptEncoder.encode reads LTX2_GEMMA_MAX_LENGTH (default 1024); each
+    # of the 48 Gemma blocks costs O(T) in its MLP and O(T^2) in attention,
+    # so dropping 1024 -> 256 is ~4x less MLP and ~16x less attention inside
+    # the single command buffer the watchdog is timing. Prompts are
+    # truncated from the LEFT (upstream keeps the last T tokens), so a
+    # normal prompt is untouched. This is NOT applied pre-emptively — it
+    # costs conditioning headroom on very long prompts, so it only arms
+    # itself after this machine has actually proven it needs it.
+    _METAL_TIMEOUT_RX = re.compile(
+        r"kIOGPUCommandBufferCallbackErrorTimeout|Caused GPU Timeout Error",
+        re.IGNORECASE)
+    # Anything proving the run got PAST prompt encoding. If the watchdog
+    # fires later than that (denoise, decode), a shorter prompt encode is
+    # not the fix and an automatic retry would just burn another render.
+    _PAST_PROMPT_ENCODE_RX = re.compile(
+        r"Denoising|\[Decoding|Loading transformer|step:denoise",
+        re.IGNORECASE)
+    # Overridable for anyone who needs a different landing spot.
+    GEMMA_FALLBACK_MAX_LENGTH = max(
+        64, int(os.environ.get("LTX_GEMMA_FALLBACK_MAX_LENGTH", "256") or 256))
+
+    def _sniff_helper_line(self, line: str) -> None:
+        """Watch every helper line for the Metal GPU-watchdog signature.
+
+        Called for BOTH the JSON `log` events and the raw non-JSON lines —
+        the crash line is C++ stderr (`libc++abi: terminating due to ...`),
+        never a structured event, so sniffing only the log events would
+        miss the one line that matters.
+        """
+        if not line:
+            return
+        if not self._metal_timeout_seen and self._METAL_TIMEOUT_RX.search(line):
+            self._metal_timeout_seen = True
+        if not self._past_prompt_encode and self._PAST_PROMPT_ENCODE_RX.search(line):
+            self._past_prompt_encode = True
+
+    def _gemma_fallback_applies(self) -> bool:
+        """True when the run that just died is a retryable Gemma-encode
+        watchdog kill: signature seen, still inside prompt encoding, no
+        fallback armed yet this boot, and the helper really is dead (so
+        there is nothing half-done to collide with)."""
+        # A /stop that lands in the same instant as the crash must win —
+        # never resurrect a job the user just cancelled.
+        with LOCK:
+            cur = STATE.get("current")
+        if cur is not None and cur.get("cancel_requested"):
+            return False
+        return (self._metal_timeout_seen
+                and not self._past_prompt_encode
+                and self.gemma_max_length is None
+                and not self.is_alive())
+
     def run(self, job_spec: dict) -> dict:
+        """Run a job, with one automatic retry at a shorter Gemma prompt
+        encode if the macOS GPU watchdog killed this machine's encode.
+
+        The retry is deliberately cheap and bounded: the timeout happens
+        before ANY sampling or output is written, the helper is already
+        dead (so _ensure respawns it with the shorter length), and the
+        fallback arms at most once per panel boot — every later job in the
+        session spawns pre-mitigated instead of crashing again.
+        """
+        try:
+            return self._run_once(job_spec)
+        except RuntimeError:
+            if not self._gemma_fallback_applies():
+                raise
+            self.gemma_max_length = self.GEMMA_FALLBACK_MAX_LENGTH
+            push(f"[gemma-fallback] the macOS GPU watchdog killed prompt "
+                 f"encoding on this chip. Retrying this job once with Gemma "
+                 f"encoding at {self.gemma_max_length} tokens instead of 1024 "
+                 f"— nothing was rendered yet, so no work is lost.")
+        return self._run_once(job_spec)
+
+    def _run_once(self, job_spec: dict) -> dict:
+        # Per-run detector state — reset here so a watchdog kill seen on an
+        # earlier job can't arm the fallback for an unrelated failure.
+        self._metal_timeout_seen = False
+        self._past_prompt_encode = False
         # Whole-run serialization so concurrent callers don't both park in
         # _read_until and grab each other's done/error events. See __init__
         # for why this is distinct from self.lock.
@@ -5796,21 +7205,45 @@ class WarmHelper:
                     # prompt encoding — "[METAL] Command buffer execution failed:
                     # Caused GPU Timeout Error". Name it, because the generic
                     # "assertion failed" sends people hunting the wrong thing.
-                    # Note LTX2_GEMMA_EVAL_EVERY is already 1 (the smallest
-                    # command-buffer setting) so there is no knob left to turn —
-                    # this is an engine/driver issue worth reporting upstream.
+                    # LTX2_GEMMA_EVAL_EVERY is already 1 (the smallest
+                    # command-buffer setting). CORRECTION (2026-08): the
+                    # earlier note here said that left no knob to turn —
+                    # wrong. The *width* of that buffer is still tunable via
+                    # LTX2_GEMMA_MAX_LENGTH, which upstream reads in
+                    # PromptEncoder.encode; see the Gemma fallback block
+                    # below, which arms it automatically on a detected kill.
                     "SIGABRT": (
                         "C-level abort. If the log shows '[METAL] Command buffer "
                         "execution failed: Caused GPU Timeout Error', this is the "
                         "macOS GPU watchdog killing an over-long Metal command "
                         "buffer (seen on M1/M2-class GPUs during prompt encoding). "
-                        "Phosphene already runs the smallest command buffers it "
-                        "can (LTX2_GEMMA_EVAL_EVERY=1), so please open an issue "
-                        "with your chip + macOS version and the crashlog at "
+                        "Phosphene retries prompt encoding once at a shorter "
+                        "padded length when it sees that line; if it never "
+                        "reached the panel, please open an issue with your chip "
+                        "+ macOS version and the crashlog at "
                         "~/Library/Logs/DiagnosticReports/python3.11_*.ips"
                     ),
                     "SIGBUS":  "memory access fault — could indicate a Metal driver issue or a bad weight file",
                 }.get(sig_name, "external kill")
+                # #44: when the watchdog signature is actually in this job's
+                # log, stop hedging — name it outright and say what we already
+                # tried. The conditional SIGABRT wording above still covers the
+                # case where the line never reached us.
+                if self._metal_timeout_seen:
+                    _tried = (
+                        f" Prompt encoding was already retried at "
+                        f"{self.gemma_max_length} tokens and still timed out."
+                        if self.gemma_max_length is not None else ""
+                    )
+                    hint = (
+                        "the macOS GPU watchdog killed a Metal command buffer "
+                        "(kIOGPUCommandBufferCallbackErrorTimeout) — that line is "
+                        "in this job's log, so this is a driver-level kill, not a "
+                        "Phosphene assertion." + _tried + " Please add your chip + "
+                        "macOS version and the crashlog at "
+                        "~/Library/Logs/DiagnosticReports/python3.11_*.ips to "
+                        "https://github.com/mrbizarro/phosphene/issues/44"
+                    )
                 raise RuntimeError(
                     f"helper exited from {sig_name} ({hint}); returncode={rc}"
                 )
@@ -6786,6 +8219,17 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         _h3_upscale = "fit_1080p"
     if _h3_upscale not in H3_UPSCALE_MODES:
         _h3_upscale = H3_UPSCALE_DEFAULT
+    # Sampler depth override for an H3 render ("Steps" pills). 0 = Auto = the
+    # tier's tuned count (9 → 8 forwards, the validated speed/quality point).
+    # The official reference recipe runs 20; wall time scales ~(steps-1)/8.
+    _h3_steps_raw = (f("h3_steps", "") or "").strip().lower()
+    if _h3_steps_raw in ("", "auto", "0"):
+        _h3_steps = 0
+    else:
+        try:
+            _h3_steps = max(4, min(30, int(_h3_steps_raw)))
+        except (TypeError, ValueError):
+            _h3_steps = 0
     if _engine == "h3":
         if mode_in not in H3_MODES:
             push(f"engine=h3 requested for mode={mode_in!r} — Hailuo H3 only "
@@ -6831,6 +8275,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # fit_1080p). SAME allowlist trap as every key in this dict: a new
             # form field that isn't listed here silently no-ops on /queue/add.
             "h3_upscale": _h3_upscale,
+            # Steps override for H3 (0 = Auto = tier default). Kept alongside
+            # the resolved `steps` below so the ⓘ modal can say the default
+            # was overridden. Same allowlist trap as above.
+            "h3_steps": _h3_steps,
             "prompt": prompt,
             "negative_prompt": f("negative_prompt", ""),
             "width": max(32, int(f("width", str(default_w)) or default_w)),
@@ -6966,7 +8414,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # the per-window count, so the queue card and the duration line read the
         # clip the user actually gets. run_h3_job_inner splits it back out.
         job["params"]["frames"] = _tier_cfg["frames"]
-        job["params"]["steps"] = _tier_cfg["steps"]
+        # Tier steps unless the user pinned a depth on the Steps pills —
+        # run_h3_job_inner reads this resolved value, so the override rides
+        # the SAME path the tier default does (nothing downstream branches).
+        job["params"]["steps"] = int(_h3_steps or _tier_cfg["steps"])
         job["params"]["h3_chain_windows"] = int(_tier_cfg.get("chain_windows") or 1)
         job["params"]["h3_window_frames"] = int(
             _tier_cfg.get("window_frames") or _tier_cfg["frames"])
@@ -8631,6 +10082,28 @@ def run_job_inner(job: dict) -> None:
         src = p["video_path"]
         if not src or not Path(src).exists():
             raise RuntimeError(f"source video for extend not found: {src}")
+        # Feed the model the NATIVE render, not the export (issue #48).
+        #
+        # An upscaled render hides its native file from the gallery, so the
+        # Extend picker can only ever offer the export — and Extend was
+        # taking it at face value. That put a lanczos upscale + H.264
+        # re-encode (and, when the export letterboxes, black bars) in front
+        # of every extend, and then Extend's own clamp resampled the whole
+        # thing back DOWN again. Chained extends therefore paid a fresh
+        # resample + generation on the first hop of every chain, on top of
+        # the per-round cost the pipeline already carries.
+        #
+        # `_native_render_for` is a no-op for clips that were never
+        # exported and for extend outputs (their sidecar points at
+        # themselves), so this only fires where there is a strictly better
+        # file sitting right next to the one the user picked.
+        picked_src = Path(src)
+        native_src = _native_render_for(picked_src)
+        if native_src != picked_src:
+            src = str(native_src)
+            push(f"Extend: using the native render {native_src.name} instead of "
+                 f"the export {picked_src.name} — skips an upscale + re-encode "
+                 f"round-trip before the model sees it.")
         # Resolution clamp — same fix shape as FFLF. The upstream extend
         # pipeline runs the dev transformer in CFG-guided mode (line 294
         # of extend.py — guided_denoise_loop is unconditional; cfg_scale=1.0
@@ -8706,6 +10179,15 @@ def run_job_inner(job: dict) -> None:
             "fps": FPS, "model": str(Q8_LOCAL_PATH), "queue_id": job["id"],
             "helper_elapsed_sec": result.get("elapsed_sec"),
             "output_codec": output_codec_settings(),
+            # Lineage for issue #48. `extend_picked` is what the user chose in
+            # the UI, `extend_source` is what actually reached the model after
+            # native-resolution + the tier clamp. A chain of these is what a
+            # future "carry the pristine prior segment forward" pass needs to
+            # walk, and it makes a degraded chain diagnosable from the sidecars
+            # alone instead of by reading filenames.
+            "extend_picked": str(picked_src),
+            "extend_source": src,
+            "extend_new_frames": int(p["extend_frames"]) * 8,
         }
         write_sidecar(final_out.with_suffix(final_out.suffix + ".json"), sidecar)
         job["output_path"] = str(final_out)
@@ -10039,6 +11521,13 @@ def worker_loop() -> None:
             job["finished_at"] = iso_now()
             if job.get("started_ts"):
                 job["elapsed_sec"] = round(time.time() - job["started_ts"], 2)
+            # Anonymous usage counts. This is the single point every job
+            # from every engine passes through (LTX, H3, image, training),
+            # so one call covers them all and a future engine is counted
+            # for free. Returns immediately and cannot raise — see the
+            # analytics section's contract; it must never be able to turn
+            # a finished render into a failed one.
+            _analytics_render_event(job)
             with LOCK:
                 STATE["history"].insert(0, job)
                 STATE["history"] = STATE["history"][:HISTORY_LIMIT]
@@ -10766,6 +12255,20 @@ class Handler(BaseHTTPRequestHandler):
             try: self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError): pass
             return
+        # Usage section of the same dashboard. Local aggregates from
+        # state/usage-log.jsonl always; fleet aggregates from PostHog when a
+        # personal API key is configured (6 h cached). `?force=1` busts the
+        # cache for the dashboard's refresh button. Never raises out — a
+        # broken usage view must not 500 the maintainer's stats page.
+        if parsed.path == "/stats/usage":
+            try:
+                qs = parse_qs(parsed.query)
+                report = _usage_report(force=qs.get("force", ["0"])[0] == "1")
+            except Exception as exc:
+                report = {"ok": False, "source": "local",
+                          "error": str(exc)[:200]}
+            self._json(report)
+            return
         if parsed.path == "/status":
             qs = parse_qs(parsed.query)
             include_hidden = qs.get("include_hidden", ["0"])[0] == "1"
@@ -10811,6 +12314,11 @@ class Handler(BaseHTTPRequestHandler):
             payload["mlx_metal_version"] = HELPER.ready_info.get("mlx_metal_version")
             payload["chip"] = HELPER.ready_info.get("chip")
             payload["macos"] = HELPER.ready_info.get("macos")
+            # #44: null on a healthy machine. Non-null means this boot hit the
+            # Metal GPU watchdog during prompt encoding and Gemma is now
+            # encoding at the shorter padded length — the single most useful
+            # field on a "my prompts feel weaker" follow-up report.
+            payload["gemma_max_length"] = HELPER.gemma_max_length
             # Per-kind avg ETA: image jobs are 30s–2min, video jobs are
             # 5–30min. Computing queue ETA from one mixed avg makes an
             # image queued after a few videos show "~30 min" — the
@@ -11736,9 +13244,11 @@ class Handler(BaseHTTPRequestHandler):
 
         # ====== Train Character — preflight model check.
         # required_files.json's q4 entry ships transformer-distilled only.
-        # Training needs transformer-dev (extra ~11 GB), which isn't in the
-        # default install. Surface what's missing so the UI can offer a
-        # one-click download via the existing hf flow.
+        # Training needs the FULL-PRECISION transformer-dev from the Q8 repo
+        # (extra ~21 GB), which isn't in the default install. Surface what's
+        # missing so the UI can offer a one-click download via the existing
+        # hf flow. (The Q4 repo's transformer-dev is quantized — the trainer
+        # refuses it, #35 — so the preflight neither offers nor greenlights it.)
         if parsed.path == "/train/preflight":
             req = _train_required_models()
             self._json({"ok": True, "required": req,
@@ -14686,9 +16196,14 @@ class Handler(BaseHTTPRequestHandler):
                 prev.get("memory_policy", DEFAULT_MEMORY_POLICY) !=
                 current.get("memory_policy", DEFAULT_MEMORY_POLICY)
             )
-            # Analytics opt-in lifecycle removed 2026-05-22 (the entire
-            # analytics surface was rolled back — we stand on GitHub-data
-            # signal via docs/stats.html instead).
+            # Anonymous usage analytics. No helper restart needed — the
+            # analytics path reads get_settings() per event, in-process.
+            # Log the flip so there's a visible record in the panel log
+            # of a setting that governs what leaves the machine.
+            if prev.get("analytics_enabled", True) != current.get("analytics_enabled", True):
+                push("settings: anonymous usage analytics "
+                     + ("ON." if current.get("analytics_enabled", True)
+                        else "OFF - nothing is sent or logged."))
             if codec_changed:
                 push(
                     f"settings: output codec → {current['output_pix_fmt']} "
@@ -20211,11 +21726,30 @@ HTML = r"""<!doctype html>
       font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
       color: var(--muted); width: 52px; flex: none;
     }
+    /* Slider needs the same chrome reset as .range-strip — the generic
+       `input, textarea, select, button` rule paints every input with a
+       border + panel background + 8px/11px padding, which turned this
+       track into a boxed control that ate ~24px of row width on top of
+       being the greedy flex child. */
     .lora-row .lora-strength-row input[type="range"] {
       flex: 1; min-width: 0; accent-color: var(--accent);
+      padding: 0; border: none; background: none;
     }
-    .lora-row .lora-strength-row input[type="number"] {
-      width: 54px; padding: 2px 5px; font-size: 11px; text-align: right;
+    /* The picker renders inside #genForm on the video form, where
+       `#genForm input[type="number"]` wins on ID specificity and
+       re-inflated this readout to 13px text with 10px/12px padding.
+       In a 54px border-box that left ~28px of content, and the native
+       spinner ate half of what was left, so the strength value was
+       clipped to an unreadable sliver (issue #45). Repeat the compact
+       sizing at matching specificity, pin the box with flex:none so it
+       can never shrink, and give it room for the widest value ("-1.05").
+       The un-prefixed selector still covers the picker when it's
+       portaled to the Image Studio / Characters slots, which render
+       outside the form. */
+    .lora-row .lora-strength-row input[type="number"],
+    #genForm .lora-row .lora-strength-row input[type="number"] {
+      flex: none; width: 68px;
+      padding: 2px 5px; font-size: 11px; text-align: right;
     }
     .lora-row .trigger-chips {
       display: flex; flex-wrap: wrap; gap: 3px; margin-top: 7px;
@@ -22574,6 +24108,29 @@ HTML = r"""<!doctype html>
             </div>
           </div>
           <input type="hidden" name="h3_upscale" id="h3_upscale" value="fit_720p">
+          <!-- H3 sampler depth. Tiers bake 9 steps (8 forwards) — the
+               validated speed/quality point; the official reference recipe
+               runs 20. Four honest pills with the time cost in the tooltip
+               beat an unbounded numeric box. `h3_steps` is in the make_job
+               allowlist (an unlisted field silently no-ops on /queue/add). -->
+          <div class="h3-export-row" id="h3StepsRow" data-h3-only>
+            <span class="h3-export-label">Steps</span>
+            <div class="pill-group" id="h3StepsGroup" style="display:flex;gap:4px;flex:0 0 auto;">
+              <button type="button" class="pill-btn active" data-h3-steps="auto"
+                      style="padding:4px 10px;font-size:12px;"
+                      title="The tier's tuned count — the validated speed/quality point.">Auto</button>
+              <button type="button" class="pill-btn" data-h3-steps="12"
+                      style="padding:4px 10px;font-size:12px;"
+                      title="More refinement — ~1.4× the tier's render time.">12</button>
+              <button type="button" class="pill-btn" data-h3-steps="16"
+                      style="padding:4px 10px;font-size:12px;"
+                      title="~1.9× the tier's render time.">16</button>
+              <button type="button" class="pill-btn" data-h3-steps="20"
+                      style="padding:4px 10px;font-size:12px;"
+                      title="The official reference recipe — ~2.4× the tier's render time.">20</button>
+            </div>
+          </div>
+          <input type="hidden" name="h3_steps" id="h3_steps" value="auto">
           <!-- 2026-05-17 (Codex C+ pass 6): the character-only skip-step
                toggle moved out of here into the Customize section as
                "HQ speed". It's a Q8 sampler control, not a character
@@ -24405,6 +25962,89 @@ HTML = r"""<!doctype html>
         </button>
       </div>
       <div class="hint" id="spicyHint" style="margin-top:8px; display:none"></div>
+    </div>
+
+    <!-- Anonymous usage analytics. Default ON, one click to turn off, and
+         the copy below is the whole truth about what leaves the machine —
+         if this list and docs/ANALYTICS.md ever disagree, the code is the
+         bug. The maintainer key rows live behind a <details> because
+         ordinary users have no use for them; a fork that wants its own
+         receiver, or the project owner switching the fleet on, pastes
+         keys there. Reuses the spicy-row / token-row markup so this
+         section inherits the modal's existing styling with no new CSS. -->
+    <div class="settings-section">
+      <h3>Anonymous usage analytics</h3>
+      <div class="hint" style="margin-bottom:10px">
+        Sends anonymous counts so bugs in the field get noticed: panel
+        version, hardware class (e.g. <em>M4 Max, 64 GB</em>), which
+        optional packs are installed, and for each render the engine,
+        tier, resolution, frame count and a coarse duration bucket —
+        plus the first line of the error when one fails.
+        <b>Never your prompts, filenames, paths, images or video.</b>
+        You are a random ID, generated on this Mac and tied to nothing.
+        Everything the panel would send is also written in plain text to
+        <code>state/usage-log.jsonl</code> so you can read it yourself;
+        the full schema is in <code>docs/ANALYTICS.md</code>.
+      </div>
+      <div class="spicy-row">
+        <span class="spicy-state" id="analyticsStateBadge">ON</span>
+        <button type="button" class="ghost-btn" id="analyticsToggleBtn"
+                onclick="toggleAnalytics()" style="margin-left:auto">
+          Turn off
+        </button>
+      </div>
+      <div class="hint" id="analyticsHint" style="margin-top:8px"></div>
+
+      <details style="margin-top:12px">
+        <summary style="cursor:pointer; font-size:12px; color:var(--muted, #9aa)">
+          Maintainer / self-hosting keys
+        </summary>
+        <div class="hint" style="margin:8px 0">
+          Without a project key this panel opens no network connection at
+          all — analytics is inert and only the local log is written. Point
+          <code>PHOSPHENE_ANALYTICS_HOST</code> at your own receiver to
+          self-host.
+        </div>
+        <div class="token-row">
+          <div class="token-label">
+            <span>PostHog project key <span class="hint">(capture)</span></span>
+            <span class="token-status" id="analyticsKeyStatus">—</span>
+          </div>
+          <div class="token-row-input">
+            <input type="password" id="analyticsKeyInput" autocomplete="off"
+                   placeholder="phc_…">
+            <button type="button" class="ghost-btn"
+                    onclick="toggleTokenVisibility('analyticsKeyInput', this)">show</button>
+            <button type="button" class="primary-btn token-savetest"
+                    onclick="saveAnalyticsKey('analytics_key')">save</button>
+            <button type="button" class="ghost-btn" id="analyticsKeyClear"
+                    onclick="clearAnalyticsKey('analytics_key')" style="display:none">clear</button>
+          </div>
+          <div class="hint">
+            Write-only project key. Pasting one turns the pings on.
+          </div>
+        </div>
+        <div class="token-row">
+          <div class="token-label">
+            <span>PostHog personal API key <span class="hint">(fleet view)</span></span>
+            <span class="token-status" id="analyticsQueryKeyStatus">—</span>
+          </div>
+          <div class="token-row-input">
+            <input type="password" id="analyticsQueryKeyInput" autocomplete="off"
+                   placeholder="phx_…">
+            <button type="button" class="ghost-btn"
+                    onclick="toggleTokenVisibility('analyticsQueryKeyInput', this)">show</button>
+            <button type="button" class="primary-btn token-savetest"
+                    onclick="saveAnalyticsKey('analytics_query_key')">save</button>
+            <button type="button" class="ghost-btn" id="analyticsQueryKeyClear"
+                    onclick="clearAnalyticsKey('analytics_query_key')" style="display:none">clear</button>
+          </div>
+          <div class="hint">
+            Read-only key that unlocks the fleet numbers in the Usage
+            section of the stats dashboard. Never used for sending.
+          </div>
+        </div>
+      </details>
     </div>
 
     <div class="settings-section" id="settingsCustomSection" style="display:none">
@@ -28293,9 +29933,11 @@ function trainGuidanceDismiss() {
 
 // Hits /train/preflight and surfaces a banner inside the Train form when a
 // required model is missing. Today the only on-demand download is the LTX-2.3
-// dev transformer (~11 GB) — Phosphene's default install ships the distilled
-// transformer only. Banner offers a one-click Download button that triggers
-// /train/install + redirects to /status for progress.
+// full-precision dev transformer (~21 GB, Q8 repo) — Phosphene's default
+// install ships the distilled transformer only, and the Q4 repo's smaller
+// transformer-dev is quantized (trainer refuses it, #35). Banner offers a
+// one-click Download button that triggers /train/install + redirects to
+// /status for progress.
 async function trainCheckPreflight() {
   const box = document.getElementById('trainPreflight');
   if (!box) return;
@@ -29550,6 +31192,8 @@ function updateCustomizeSummary() {
     const tier = h3TierByKey((document.getElementById('h3_tier') || {}).value);
     const up = (document.getElementById('h3_upscale') || {}).value || 'off';
     const parts = [tier ? tier.spec : 'Hailuo H3'];
+    const stOv = (document.getElementById('h3_steps') || {}).value || 'auto';
+    if (stOv !== 'auto') parts.push(stOv + ' steps');
     if (up === 'fit_720p') parts.push('720p export');
     else if (up === 'fit_1080p') parts.push('1080p export');
     else parts.push('native export');
@@ -29691,6 +31335,12 @@ function h3TierByKey(key) {
   try { savedUp = localStorage.getItem('phos_h3_upscale'); } catch (e) {}
   const allowed = H3.upscale_modes || ['off', 'fit_720p', 'fit_1080p'];
   if (savedUp && allowed.indexOf(savedUp) !== -1) up.value = savedUp;
+  // And again for the sampler-depth pills, same reason.
+  const st = document.getElementById('h3_steps');
+  if (!st) return;
+  let savedSt = null;
+  try { savedSt = localStorage.getItem('phos_h3_steps'); } catch (e) {}
+  if (savedSt && ['auto', '12', '16', '20'].indexOf(savedSt) !== -1) st.value = savedSt;
 })();
 
 // Export canvas for an H3 render. Separate from the LTX `upscale` control
@@ -29708,6 +31358,29 @@ function setH3Upscale(mode) {
 }
 document.querySelectorAll('#h3UpscaleGroup [data-h3-upscale]').forEach(b => {
   b.onclick = () => setH3Upscale(b.dataset.h3Upscale);
+});
+
+// Sampler depth for an H3 render. 'auto' = the tier's tuned count (stamped in
+// H3_TIERS); a number overrides it for every window of the job. Server-side
+// make_job clamps to 4-30 and re-validates — a stale tab must never win.
+function setH3Steps(v) {
+  const allowed = ['auto', '12', '16', '20'];
+  v = allowed.indexOf(String(v)) !== -1 ? String(v) : 'auto';
+  const inp = document.getElementById('h3_steps');
+  if (inp) inp.value = v;
+  document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b =>
+    b.classList.toggle('active', b.dataset.h3Steps === v));
+  // Mirror the resolved count into the shared hidden `steps` so the queue
+  // card and the estimate line read the truth (make_job re-stamps anyway).
+  const tier = h3TierByKey((document.getElementById('h3_tier') || {}).value);
+  const s = document.getElementById('steps');
+  if (s && tier) s.value = (v === 'auto') ? tier.steps : parseInt(v, 10);
+  try { localStorage.setItem('phos_h3_steps', v); } catch (e) {}
+  if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+  if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
+}
+document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
+  b.onclick = () => setH3Steps(b.dataset.h3Steps);
 });
 
 function _engineRowVisible() {
@@ -29755,7 +31428,12 @@ function setH3Tier(key) {
   if (w) w.value = tier.width;
   if (h) h.value = tier.height;
   if (f) f.value = tier.frames;
-  if (s) s.value = tier.steps;
+  if (s) {
+    // Respect a pinned Steps override across tier switches; 'auto' follows
+    // the tier's own count.
+    const ov = (document.getElementById('h3_steps') || {}).value || 'auto';
+    s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10) : tier.steps;
+  }
   // Chained tiers carry an honest artefact note (one prompt is asked of every
   // window, so a scripted line lands once per window). Surface it where the
   // user is choosing, not in a tooltip.
@@ -29846,6 +31524,7 @@ function setEngine(engine, opts) {
     setH3Tier((document.getElementById('h3_tier') || {}).value || H3.default_tier);
     setH3Upscale((document.getElementById('h3_upscale') || {}).value
                  || H3.default_upscale || 'fit_720p');
+    setH3Steps((document.getElementById('h3_steps') || {}).value || 'auto');
     // LTX post-processing doesn't run on an H3 render (make_job neutralises
     // all three server-side). Mirror that in the UI or the derived line lies:
     // it was reading "768×448 → 1280×720 fit" for a render that ships 768×448.
@@ -30714,8 +32393,12 @@ function renderDeepVerifyStatus(deep) {
   if (!r) return;
   if (r.error) { st.textContent = 'verify error: ' + r.error; return; }
   if (!r.ok) {
-    const n = (r.bad || []).length;
-    st.innerHTML = '<span style="color:#e06666">✗ ' + n + ' file(s) corrupt/stale — use the red banner up top to re-download.</span>';
+    const nMisplaced = (r.bad || []).filter(b => b.placement).length;
+    const n = (r.bad || []).length - nMisplaced;
+    st.innerHTML = '<span style="color:#e06666">✗ '
+      + [n ? n + ' file(s) corrupt/stale' : '',
+         nMisplaced ? nMisplaced + ' file(s) in the wrong place' : ''].filter(Boolean).join(', ')
+      + ' — see the red banner up top.</span>';
   } else {
     const uv = (r.unverified || []).length;
     st.innerHTML = '<span style="color:#5bbf7b">✓ all ' + r.checked + ' file(s) match upstream'
@@ -30739,11 +32422,26 @@ function renderIntegrityBanner(integ) {
     document.body.appendChild(el);
   }
   const repos = [...new Set(bad.map(b => b.repo))];
-  const files = bad.map(b => b.file).join(', ');
+  // Placement errors (right content, wrong path) are a different failure from a
+  // corrupt download, and the cure is usually a move rather than a re-fetch — so
+  // they get their own headline and their reason printed in full (it names both
+  // the found-at and expected-at paths). See _placement_errors() in the backend.
+  const misplaced = bad.filter(b => b.placement);
+  const corrupt = bad.filter(b => !b.placement);
   el.innerHTML =
-    '<span style="font-weight:700">Model files look incomplete / corrupt</span>'
-    + '<span style="opacity:.92">' + escapeHtml(files) + ' — this produces garbled / "mosaic" '
-    + 'output (usually an interrupted download).</span>'
+    '<span style="font-weight:700">'
+    + (corrupt.length ? 'Model files look incomplete / corrupt'
+                      : 'Model files are in the wrong place') + '</span>'
+    + (corrupt.length
+        ? '<span style="opacity:.92">' + escapeHtml(corrupt.map(b => b.file).join(', '))
+          + ' — this produces garbled / "mosaic" output (usually an interrupted '
+          + 'download).</span>'
+        : '')
+    + (misplaced.length
+        ? '<span style="opacity:.92;flex-basis:100%">'
+          + misplaced.map(b => escapeHtml(b.reason)).join('<br>')
+          + '</span>'
+        : '')
     + '<span style="margin-left:auto;display:flex;gap:8px">'
     + repos.map(k => '<button class="btn btn-primary" onclick="repairModel(\'' + escapeHtml(k)
         + '\')">Repair ' + escapeHtml(k.toUpperCase()) + ' (re-download)</button>').join('')
@@ -32547,6 +34245,11 @@ function renderOutputInfoBody(path, data) {
     const h3TierDef = ((H3 && H3.tiers) || []).find(t => t.key === h3TierKey);
     genRows.push(`<dt>Engine</dt><dd>Hailuo H3</dd>`);
     genRows.push(`<dt>H3 tier</dt><dd>${escapeHtml(h3TierDef ? h3TierDef.label : (h3TierKey || '—'))}</dd>`);
+    // Steps only earns a row when the user pinned a depth — the tier default
+    // is already implied by the tier row.
+    if (Number(p.h3_steps || 0) > 0) {
+      genRows.push(`<dt>Steps</dt><dd>${escapeHtml(String(p.steps || p.h3_steps))} · tier default overridden</dd>`);
+    }
   } else {
     genRows.push(`<dt>Quality</dt><dd>${escapeHtml((p.quality || 'standard').replace(/^./, c => c.toUpperCase()))}</dd>`);
   }
@@ -33471,6 +35174,113 @@ async function openSettingsModal() {
   // on the JS side; only ON/OFF gets persisted.
   _spicyArmed = false;
   renderSpicyState(!!cur.spicy_mode);
+
+  // Anonymous usage analytics — badge, hint (shows the actual install id
+  // so "you are a random ID" is verifiable, not a claim), and the two
+  // maintainer key rows. Same has_X-boolean treatment as the other
+  // secrets: the keys never come back from the server.
+  renderAnalyticsState(cur);
+}
+
+// ---- Anonymous usage analytics ---------------------------------------------
+// Single-click both ways: turning it OFF must be at least as easy as
+// leaving it ON, which is the whole justification for defaulting to ON.
+// No confirm dance here (unlike Spicy mode) — nothing irreversible happens.
+function renderAnalyticsState(cur) {
+  const on = cur.analytics_enabled !== false;
+  const badge = document.getElementById('analyticsStateBadge');
+  const btn = document.getElementById('analyticsToggleBtn');
+  const hint = document.getElementById('analyticsHint');
+  if (badge) {
+    badge.textContent = on ? 'ON' : 'OFF';
+    badge.className = 'spicy-state' + (on ? ' on' : '');
+  }
+  if (btn) btn.textContent = on ? 'Turn off' : 'Turn on';
+  if (hint) {
+    if (!on) {
+      hint.textContent = 'Off — nothing is sent, and nothing is written to '
+        + 'the local usage log either.';
+    } else if (!cur.has_analytics_key) {
+      hint.innerHTML = 'On, but no project key is configured — this panel is '
+        + 'sending <b>nothing</b> over the network. Events are only written to '
+        + 'the local log.';
+    } else {
+      hint.textContent = 'Your anonymous ID: ' + (cur.analytics_install_id || '(not yet generated)');
+    }
+  }
+  setTokenStatus('analyticsKey', !!cur.has_analytics_key);
+  setTokenStatus('analyticsQueryKey', !!cur.has_analytics_query_key);
+  const k1 = document.getElementById('analyticsKeyInput');
+  const k2 = document.getElementById('analyticsQueryKeyInput');
+  if (k1) { k1.value = ''; k1.placeholder = cur.has_analytics_key ? '•••••••••• saved — paste new to replace' : 'phc_…'; }
+  if (k2) { k2.value = ''; k2.placeholder = cur.has_analytics_query_key ? '•••••••••• saved — paste new to replace' : 'phx_…'; }
+  const c1 = document.getElementById('analyticsKeyClear');
+  const c2 = document.getElementById('analyticsQueryKeyClear');
+  if (c1) c1.style.display = cur.has_analytics_key ? '' : 'none';
+  if (c2) c2.style.display = cur.has_analytics_query_key ? '' : 'none';
+}
+
+async function toggleAnalytics() {
+  const cur = (_settingsCache && _settingsCache.settings) || {};
+  const target = !(cur.analytics_enabled !== false);
+  const status = document.getElementById('settingsStatus');
+  try {
+    const fd = new URLSearchParams();
+    fd.set('analytics_enabled', target ? 'true' : 'false');
+    const r = await fetch('/settings', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    if (j.settings) _settingsCache.settings = j.settings;
+    else if (_settingsCache && _settingsCache.settings) {
+      _settingsCache.settings.analytics_enabled = target;
+    }
+    renderAnalyticsState(_settingsCache.settings || {});
+    if (status) {
+      status.textContent = target
+        ? 'Anonymous usage analytics ON'
+        : 'Anonymous usage analytics OFF · nothing will be sent or logged';
+      status.className = 'settings-status ok';
+    }
+  } catch (e) {
+    if (status) {
+      status.textContent = 'Could not change analytics: ' + (e.message || e);
+      status.className = 'settings-status err';
+    }
+  }
+}
+
+async function _persistAnalyticsKey(field, value) {
+  const status = document.getElementById('settingsStatus');
+  try {
+    const fd = new URLSearchParams();
+    fd.set(field, value);
+    const r = await fetch('/settings', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    if (j.settings) _settingsCache.settings = j.settings;
+    renderAnalyticsState(_settingsCache.settings || {});
+    if (status) {
+      status.textContent = value ? 'Key saved.' : 'Key cleared.';
+      status.className = 'settings-status ok';
+    }
+  } catch (e) {
+    if (status) {
+      status.textContent = 'Could not save key: ' + (e.message || e);
+      status.className = 'settings-status err';
+    }
+  }
+}
+
+function saveAnalyticsKey(field) {
+  const id = field === 'analytics_query_key' ? 'analyticsQueryKeyInput' : 'analyticsKeyInput';
+  const el = document.getElementById(id);
+  const val = (el && el.value || '').trim();
+  if (!val) return;
+  _persistAnalyticsKey(field, val);
+}
+
+function clearAnalyticsKey(field) {
+  _persistAnalyticsKey(field, '');
 }
 
 function renderMemoryPolicyHint() {
@@ -36257,6 +38067,12 @@ if __name__ == "__main__":
     # state/ (gitignored), never on the public repo. Skipped silently
     # when no GitHub token is resolvable.
     threading.Thread(target=stats_fetch_loop, daemon=True).start()
+    # Anonymous usage analytics — one app_boot event plus any optional-pack
+    # transitions since the last boot, then nothing until a job finishes.
+    # Deliberately here in __main__ and not at import time, so `import
+    # mlx_ltx_panel` from a script or a test never emits anything. Inert
+    # unless a PostHog key is configured; see the analytics section above.
+    _analytics_boot()
     # Pre-flight: bind in a try/except so a busy port surfaces an actionable
     # one-liner instead of a 6-frame Python traceback. The bare OSError
     # ("[Errno 48] Address already in use") was confusing users who'd closed
@@ -36281,13 +38097,19 @@ if __name__ == "__main__":
     try:
         _integ = _model_integrity(force=True)
         if not _integ["ok"]:
+            _misplaced = [_b for _b in _integ["bad"] if _b.get("placement")]
             print("-" * 64, flush=True)
             print(f"WARNING model integrity: {len(_integ['bad'])} weight file(s) look "
-                  f"corrupt/incomplete:", flush=True)
+                  f"corrupt/incomplete or are in the wrong place:", flush=True)
             for _b in _integ["bad"]:
                 print(f"    [{_b['repo']}] {_b['file']} - {_b['reason']}", flush=True)
             print("  This produces garbled / 'mosaic' output. Use the Repair banner in", flush=True)
             print("  the panel (or re-run Install) to re-download the affected files.", flush=True)
+            if _misplaced:
+                print("  The misplaced file(s) above are a PLACEMENT problem, not a corrupt", flush=True)
+                print("  download: the content can be fine while the loader still resolves the", flush=True)
+                print("  wrong file. Moving/removing the copy named above fixes it without a", flush=True)
+                print("  re-download; Repair also works.", flush=True)
             print("-" * 64, flush=True)
         else:
             print(f"model integrity: OK ({_integ['checked']} weight files verified)", flush=True)
