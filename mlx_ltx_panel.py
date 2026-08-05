@@ -4390,33 +4390,90 @@ H3_FPS = 24.0
 #
 # Height/width must be multiples of 32 (runner errors otherwise). Frames land
 # on the 17n+5 grid: 73 = 3.0 s, 124 → snaps to 124 (5.1 s), 243 → 10.1 s.
-H3_TIERS: dict[str, dict] = {
-    "draft_3s": {
-        "key": "draft_3s", "label": "Draft · 3s",
-        "width": 640, "height": 384, "frames": 73, "steps": 9,
-        "spec": "640×384 · 73f", "eta": "~3 min",
-        "blurb": "Fastest look-see. Good enough to judge motion + dialogue timing.",
-    },
-    "hq_3s": {
-        "key": "hq_3s", "label": "HQ · 3s",
-        "width": 768, "height": 448, "frames": 73, "steps": 9,
-        "spec": "768×448 · 73f", "eta": "~4-5 min",
-        "blurb": "Same length as Draft at the delivery resolution.",
-    },
-    "hq_5s": {
-        "key": "hq_5s", "label": "HQ · 5s",
-        "width": 768, "height": 448, "frames": 124, "steps": 9,
-        "spec": "768×448 · 124f", "eta": "~8 min",
-        "blurb": "The workhorse: a full 5 s beat with synced dialogue.",
-    },
-    "long_10s": {
-        "key": "long_10s", "label": "Long · 10s",
-        "width": 768, "height": 448, "frames": 243, "steps": 16,
-        "spec": "768×448 · 243f", "eta": "~36 min · batch",
-        "blurb": "Needs 15 forwards — 8 ghosts at this row count. Queue it and walk away.",
-    },
-}
+#
+# CHAINED TIERS (v3.4.1). Anything past 5 s is now rendered as N chained 5 s
+# WINDOWS instead of one dense pass: window N's last decoded frame re-enters as
+# window N+1's first-frame keyframe, the duplicate frame is dropped at the join
+# and the pieces butt-join in pixel space (runner flags --chain-windows /
+# --chain-total-frames). Measured on the 64 GB M4 Max:
+#   10 s dense  = 36:12  (243f, 15 forwards, 25k packed rows, 42.6 GiB peak)
+#   10 s chain  = 17:05  (2 × 124f, 8 forwards each, 13k rows, 40.2 GiB peak)
+#   15 s chain  = 26:34  (3 × 124f — a length the dense path cannot reach here)
+# Chaining is what makes 8 forwards legitimate at 10 s+: every pass is a 5 s
+# pass, so every pass is inside the regime where 8 forwards was validated.
+# Cost is linear in duration and FLAT in memory (13,580 rows per window, every
+# window), which is the whole argument for it.
+#
+# Tier keys used by the chained path:
+#   frames         = DELIVERED frames (what the user gets; drives duration)
+#   window_frames  = frames per window handed to --frames
+#   chain_windows  = N (>1 means chained; the runner needs --chain-windows)
+#   note           = the honest artefact warning, rendered under the tier strip
+H3_TIER_CHAIN_NOTE = ("Scripted dialogue repeats once per 5 s window — put "
+                      "dialogue cues late in the prompt.")
+
+
+def _build_h3_tiers() -> dict[str, dict]:
+    tiers: dict[str, dict] = {
+        "draft_3s": {
+            "key": "draft_3s", "label": "Draft · 3s",
+            "width": 640, "height": 384, "frames": 73, "steps": 9,
+            "spec": "640×384 · 73f", "eta": "~3 min",
+            "blurb": "Fastest look-see. Good enough to judge motion + dialogue timing.",
+        },
+        "hq_3s": {
+            "key": "hq_3s", "label": "HQ · 3s",
+            "width": 768, "height": 448, "frames": 73, "steps": 9,
+            "spec": "768×448 · 73f", "eta": "~4-5 min",
+            "blurb": "Same length as Draft at the delivery resolution.",
+        },
+        "hq_5s": {
+            "key": "hq_5s", "label": "HQ · 5s",
+            "width": 768, "height": 448, "frames": 124, "steps": 9,
+            "spec": "768×448 · 124f", "eta": "~8 min",
+            "blurb": "The workhorse: a full 5 s beat with synced dialogue.",
+        },
+        "long_10s": {
+            "key": "long_10s", "label": "Long · 10s",
+            "width": 768, "height": 448, "frames": 243,
+            "window_frames": 124, "chain_windows": 2, "steps": 9,
+            "spec": "768×448 · 243f · 2×5s", "eta": "~17 min",
+            "blurb": "Two chained 5 s windows — half the dense pass's 36 min, "
+                     "and no duplicated-subject ghosting.",
+            "note": H3_TIER_CHAIN_NOTE,
+        },
+        "long_15s": {
+            "key": "long_15s", "label": "Long · 15s",
+            "width": 768, "height": 448, "frames": 362,
+            "window_frames": 124, "chain_windows": 3, "steps": 9,
+            "spec": "768×448 · 362f · 3×5s", "eta": "~27 min · batch",
+            "blurb": "Three chained windows. Identity held across both joins in "
+                     "validation. Queue it and walk away.",
+            "note": H3_TIER_CHAIN_NOTE,
+        },
+    }
+    # The dense 10 s pass is kept reachable for A/B work but is NOT offered by
+    # default: it costs 2.1× the chained tier for the same delivered clip.
+    if os.environ.get("LTX_H3_DENSE_10S", "").strip() in ("1", "true", "yes"):
+        tiers["long_10s_dense"] = {
+            "key": "long_10s_dense", "label": "Long · 10s (dense)",
+            "width": 768, "height": 448, "frames": 243, "steps": 16,
+            "spec": "768×448 · 243f · single pass", "eta": "~36 min · batch",
+            "blurb": "One dense pass at 15 forwards — the pre-chaining path. "
+                     "Kept for A/B only; the chained tier is 2.1× faster.",
+        }
+    return tiers
+
+
+H3_TIERS: dict[str, dict] = _build_h3_tiers()
 H3_TIER_DEFAULT = "draft_3s"
+# Post-render export targets for an H3 clip. H3 writes 768×448 (12:7) natively,
+# which is neither 720p nor 1080p, so the panel applies the SAME ffmpeg recipe
+# LTX renders get: lanczos fit inside the canvas, pad the remainder, re-encode
+# with the user's codec settings. Letterboxing 12:7 into 16:9 is correct — no
+# crop, no distortion.
+H3_UPSCALE_MODES = ("off", "fit_720p", "fit_1080p")
+H3_UPSCALE_DEFAULT = "fit_720p"
 # Modes H3 can serve. Text = prompt only; Image = FL2VA first-frame
 # conditioning. Everything else (FFLF, Extend, Remix, Character, A2V) is
 # LTX-pipeline-specific and has no H3 equivalent.
@@ -4440,7 +4497,12 @@ def _h3_model_roots() -> list[Path]:
 
 def _h3_python() -> Path | None:
     """Interpreter for the H3 pack. LTX_H3_PYTHON overrides (dev boxes that
-    keep the venv in a sibling checkout); otherwise the pack's own .venv."""
+    keep the venv in a sibling checkout); otherwise the pack's own .venv.
+
+    STRICT on purpose: this is the interpreter we spawn, so it must resolve to
+    a real executable. `.exists()` follows symlinks, so a dangling chain
+    correctly returns None here — see _h3_venv_present() for why that happens
+    and h3_paths() for how we report it as "repair", not "never installed"."""
     override = os.environ.get("LTX_H3_PYTHON", "").strip()
     if override:
         p = Path(override)
@@ -4450,6 +4512,34 @@ def _h3_python() -> Path | None:
         if cand.exists():
             return cand
     return None
+
+
+def _h3_venv_present() -> bool:
+    """Whether an H3 venv was ever BUILT here — regardless of whether its
+    interpreter still resolves.
+
+    `pyvenv.cfg` is the marker, NOT `bin/python3.11`. `uv venv` builds the
+    interpreter as a symlink chain into Pinokio's SHARED, app-external managed
+    Python:
+
+        .venv/bin/python3.11 -> python
+        .venv/bin/python     -> <pinokio>/cache/XDG_DATA_HOME/uv/python/
+                                cpython-3.11-macos-aarch64-none/bin/python3.11
+
+    That target belongs to Pinokio, not to Phosphene. Any other pack install
+    (or any other Pinokio app) that makes uv re-resolve, bump or prune the
+    managed interpreter leaves this chain DANGLING — at which point
+    `.exists()` is False and H3 reads as "never installed" even though the
+    venv, the runner and all ~75 GB of weights are untouched on disk. This is
+    the user-reported v3.4.0 regression: "installed other packs, H3 vanished".
+
+    required_files.json already documents this exact trap for the LTX venv
+    ("Pinokio's info.exists() check returned false on that chain ... use
+    pyvenv.cfg instead: a tiny ASCII file uv writes to every venv root, never
+    a symlink, never moves"). H3 was repeating it. `bin/activate` is the same
+    kind of plain file and is kept as a secondary probe."""
+    venv = H3_ROOT / ".venv"
+    return (venv / "pyvenv.cfg").is_file() or (venv / "bin" / "activate").is_file()
 
 
 def h3_paths() -> dict:
@@ -4482,6 +4572,36 @@ def h3_paths() -> dict:
         missing.append("Q8 components (text_encoder / video_vae / audio_vae)")
     if text_config is None:
         missing.append("upstream text_encoder config.json")
+
+    # ---- WHY it's unavailable, not just THAT it is --------------------------
+    # The three failure classes need three different sentences from the UI:
+    #
+    #   missing_weights — the ~75 GB really isn't there. A real download.
+    #   missing_venv    — the venv exists but its interpreter no longer
+    #                     resolves (the shared-uv-Python stomp above), or it
+    #                     was never built. Weights are on disk: a REPAIR, ~2
+    #                     minutes, not 75 GB.
+    #   missing_runner  — the clone is gone/partial but the weights (which
+    #                     live under mlx_models/, a different tree) survived.
+    #                     Also a repair.
+    #
+    # `repairable` is the load-bearing one: weights present + code/venv gone.
+    # It is what stops the panel silently reporting "not installed" to a user
+    # who has 75 GB of H3 weights sitting on their disk.
+    weights_ok = dit is not None and compact_root is not None and text_config is not None
+    runner_ok = runner.is_file()
+    venv_ok = python is not None
+    venv_built = _h3_venv_present()
+    if not missing:
+        reason = "ok"
+    elif not weights_ok and not (runner_ok or venv_built):
+        reason = "not_installed"
+    elif not weights_ok:
+        reason = "missing_weights"
+    elif not venv_ok:
+        reason = "missing_venv"
+    else:
+        reason = "missing_runner"
     return {
         "root": str(H3_ROOT),
         "models": str(H3_MODELS),
@@ -4492,6 +4612,14 @@ def h3_paths() -> dict:
         "compact_root": compact_root,
         "text_config": text_config,
         "missing": missing,
+        "reason": reason,
+        "runner_ok": runner_ok,
+        "venv_ok": venv_ok,
+        # venv dir + pyvenv.cfg are there but the interpreter doesn't resolve →
+        # the dangling-shared-uv-Python case, verbatim.
+        "venv_broken": venv_built and not venv_ok,
+        "weights_ok": weights_ok,
+        "repairable": bool(weights_ok and not (runner_ok and venv_ok)),
     }
 
 
@@ -4512,29 +4640,58 @@ def h3_capable() -> bool:
     return SYSTEM_RAM_GB >= H3_MIN_RAM_GB
 
 
-_H3_FF_CACHE: dict[str, bool] = {}
+_H3_FLAG_CACHE: dict[str, bool] = {}
+
+
+def _h3_runner_has_flag(flag: str) -> bool:
+    """Whether the INSTALLED runner accepts `flag`.
+
+    H3 ships as an optional pack that a user may have installed months ago, so
+    a flag the panel wants can simply not exist in their checkout. Probing the
+    script source is cheap (no subprocess), deterministic, and lets the UI hide
+    what the pack can't do instead of dying 30 s into a render with an argparse
+    error. Cached per (flag, runner mtime).
+    """
+    runner = H3_ROOT / "scripts" / "generate_staged.py"
+    try:
+        key = f"{flag}:{runner}:{runner.stat().st_mtime_ns}"
+    except OSError:
+        return False
+    if key in _H3_FLAG_CACHE:
+        return _H3_FLAG_CACHE[key]
+    try:
+        supported = flag in runner.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        supported = False
+    # Drop entries for older mtimes of the same script; keep this dict tiny.
+    for stale in [k for k in _H3_FLAG_CACHE if not k.endswith(key.split(":", 1)[1])]:
+        _H3_FLAG_CACHE.pop(stale, None)
+    _H3_FLAG_CACHE[key] = supported
+    return supported
 
 
 def h3_supports_first_frame() -> bool:
     """Whether the INSTALLED runner accepts `--first-frame` (FL2VA image
     conditioning). The flag landed after the first public branch, so an older
-    checkout renders Text fine but would die with an argparse error on Image.
-    Probed from the script source (cheap, no subprocess) and cached per mtime.
-    """
-    runner = H3_ROOT / "scripts" / "generate_staged.py"
-    try:
-        key = f"{runner}:{runner.stat().st_mtime_ns}"
-    except OSError:
-        return False
-    if key in _H3_FF_CACHE:
-        return _H3_FF_CACHE[key]
-    try:
-        supported = "--first-frame" in runner.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        supported = False
-    _H3_FF_CACHE.clear()
-    _H3_FF_CACHE[key] = supported
-    return supported
+    checkout renders Text fine but would die with an argparse error on Image."""
+    return _h3_runner_has_flag("--first-frame")
+
+
+def h3_supports_chain() -> bool:
+    """Whether the INSTALLED runner accepts `--chain-windows` (window chaining).
+
+    Chaining landed on codex/h3-engine after the first public pack, so an older
+    checkout can render 3 s and 5 s fine but has no way to reach 10 s / 15 s.
+    When this is false the chained tiers are withheld from the UI entirely and
+    make_job falls back to the longest single-pass tier."""
+    return _h3_runner_has_flag("--chain-windows")
+
+
+def h3_visible_tiers() -> list[dict]:
+    """The tiers this installation can actually render, in table order."""
+    chain_ok = h3_supports_chain()
+    return [t for t in H3_TIERS.values()
+            if chain_ok or int(t.get("chain_windows") or 1) <= 1]
 
 
 def h3_status() -> dict:
@@ -4547,13 +4704,26 @@ def h3_status() -> dict:
         "available": available,
         "installed": available,
         "first_frame": available and h3_supports_first_frame(),
+        "chain": available and h3_supports_chain(),
         "min_ram_gb": H3_MIN_RAM_GB,
         "ram_gb": round(SYSTEM_RAM_GB, 1),
         "root": paths["root"],
         "models": paths["models"],
         "missing": paths["missing"],
-        "tiers": list(H3_TIERS.values()),
+        # WHY it's unavailable — ok | not_installed | missing_weights |
+        # missing_venv | missing_runner. `repairable` means the ~75 GB of
+        # weights are still on disk and only the clone/venv needs rebuilding,
+        # so the UI can offer "Repair H3" (minutes) instead of lying about a
+        # 75 GB download the user already did. `venv_broken` narrows it
+        # further to the dangling shared-uv-Python case.
+        "reason": paths["reason"],
+        "repairable": paths["repairable"],
+        "venv_broken": paths["venv_broken"],
+        "weights_ok": paths["weights_ok"],
+        "tiers": h3_visible_tiers(),
         "default_tier": H3_TIER_DEFAULT,
+        "upscale_modes": list(H3_UPSCALE_MODES),
+        "default_upscale": H3_UPSCALE_DEFAULT,
         "modes": list(H3_MODES),
         "size_note": "~75 GB · needs 64 GB unified memory · "
                      "MiniMax Community License (territory restrictions apply)",
@@ -4584,6 +4754,12 @@ def _apply_generation_profile_to_job(job: dict) -> None:
     params["generation_profile"] = profile.get("key")
     params["generation_profile_label"] = profile.get("label")
     if not profile.get("compact"):
+        return
+    # H3 geometry is tier-defined and lives on its own grids (32-aligned dims,
+    # 17n+5 frames). Every clamp below is an LTX-pipeline clamp — applying one
+    # would hand the H3 runner a shape it rejects, and H3 already refuses to
+    # start under 60 GB anyway, so a compact profile can never reach it.
+    if (params.get("engine") or "ltx").strip().lower() == "h3":
         return
     mode = (params.get("mode") or "").lower()
     quality = (params.get("quality") or "balanced").lower()
@@ -5350,6 +5526,14 @@ class WarmHelper:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, start_new_session=True,
             )
+            # Crash guard: the helper is in its own session, so a SIGKILLed
+            # panel would leave it resident holding the LTX weights while the
+            # next panel spawns a second one. Boot reaps it from this file.
+            try:
+                _proc_guard_write("helper", self.proc.pid,
+                                  os.getpgid(self.proc.pid), note="warm helper")
+            except OSError:
+                pass
             # Fresh fd → drop any bytes carried over from a prior helper's pipe
             # so _read_until's line buffer starts clean for this process.
             self._read_carry = b""
@@ -5664,6 +5848,7 @@ class WarmHelper:
                     except Exception:
                         pass
             self.proc = None
+            _proc_guard_clear("helper")
 
     def is_alive(self) -> bool:
         # Snapshot the ref so a concurrent kill() can't null self.proc between
@@ -5758,6 +5943,120 @@ def _kill_h3_proc() -> None:
         pass
 
 
+# ---- crash guards: subprocesses that outlive a SIGKILLed panel --------------
+#
+# Both heavy children (the H3 render and the LTX warm helper) are spawned with
+# start_new_session=True so /stop can killpg the whole tree. That same flag
+# means they are NOT in the panel's process group, so `kill -9 <panel>` — a
+# crash, an OOM reaper, Force Quit — leaves them running: atexit hooks don't
+# run on SIGKILL. An orphaned H3 render holds ~40 GiB while the restarted panel
+# picks the same job back off the queue and starts a SECOND one.
+#
+# So each spawn drops a tiny guard file naming the child; boot reaps it. The
+# guard records the OWNING panel's pid, and reaping verifies the recorded pid
+# is still running the expected script before signalling anything — a recycled
+# pid must never get killed, and a second panel's children must never be
+# reaped by this one.
+_PROC_GUARDS: dict[str, tuple[Path, str]] = {
+    "h3": (STATE_DIR / "h3_running.json", "generate_staged"),
+    "helper": (STATE_DIR / "helper_running.json", "mlx_warm_helper"),
+}
+
+
+def _proc_guard_write(kind: str, pid: int, pgid: int, note: str = "") -> None:
+    entry = _PROC_GUARDS.get(kind)
+    if not entry:
+        return
+    try:
+        atomic_write_text(entry[0], json.dumps({
+            "kind": kind, "pid": int(pid), "pgid": int(pgid),
+            "panel_pid": os.getpid(), "started": iso_now(), "note": note,
+        }, indent=2))
+    except Exception:      # noqa: BLE001 — a guard must never break a render
+        pass
+
+
+def _proc_guard_clear(kind: str) -> None:
+    entry = _PROC_GUARDS.get(kind)
+    if not entry:
+        return
+    try:
+        entry[0].unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+
+def _pid_cmdline(pid: int) -> str:
+    """`ps` command line for a pid, or "" when it's gone. Cheap and portable
+    enough here — this runs at most twice, at boot."""
+    try:
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5)
+        return (out.stdout or "").strip()
+    except Exception:      # noqa: BLE001
+        return ""
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True        # alive under another uid
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def reap_orphan_subprocesses() -> None:
+    """Boot hook — kill children a previous panel process left behind.
+
+    Only ever signals a pid whose CURRENT command line still matches the
+    script the guard was written for, and only when the panel that spawned it
+    is gone. Anything else (stale guard, recycled pid, a second live panel)
+    results in the guard being dropped and nothing being killed.
+    """
+    for kind, (guard, needle) in _PROC_GUARDS.items():
+        try:
+            if not guard.is_file():
+                continue
+            data = json.loads(guard.read_text(encoding="utf-8")) or {}
+        except (OSError, json.JSONDecodeError):
+            _proc_guard_clear(kind)
+            continue
+        panel_pid = int(data.get("panel_pid") or 0)
+        if panel_pid and panel_pid != os.getpid() and _pid_alive(panel_pid):
+            # Another panel is alive and owns this child — leave both alone.
+            continue
+        pid = int(data.get("pid") or 0)
+        pgid = int(data.get("pgid") or 0)
+        cmdline = _pid_cmdline(pid) if pid else ""
+        if pid and needle in cmdline:
+            print(f"[boot] reaping orphaned {kind} subprocess pid={pid} "
+                  f"pgid={pgid} (previous panel died without cleaning up)",
+                  flush=True)
+            for sig, wait_s in ((signal.SIGTERM, 8.0), (signal.SIGKILL, 2.0)):
+                try:
+                    if pgid:
+                        os.killpg(pgid, sig)
+                    else:
+                        os.kill(pid, sig)
+                except (OSError, ProcessLookupError):
+                    break
+                deadline = time.time() + wait_s
+                while time.time() < deadline:
+                    if not _pid_alive(pid):
+                        break
+                    time.sleep(0.25)
+                if not _pid_alive(pid):
+                    break
+            print(f"[boot] {kind} orphan "
+                  f"{'still alive - kill it manually' if _pid_alive(pid) else 'gone'}",
+                  flush=True)
+        _proc_guard_clear(kind)
+
+
 def _kill_image_procs() -> None:
     """Atexit hook — SIGTERM any in-flight image-engine subprocesses
     (HiDream BF16 helper, mflux per-family binaries). Each engine registers
@@ -5787,6 +6086,68 @@ def compute_pad(w: int, h: int) -> tuple[int, int, str | None]:
     return target_w, target_h, f"pad={target_w}:{target_h}:{pad_x}:{pad_y}:color=black"
 
 
+# Filename tags an export pass appends to the native render's stem
+# (`clip.mp4` → `clip_720p.mp4`). Single source of truth: /output/delete walks
+# this list to trash the hidden native alongside the visible card, and Load
+# Params walks it to find the sidecar that lives next to the exported file.
+# Anything compute_upscale_plan can emit as `tag` MUST be here.
+UPSCALE_TAGS = ("720p", "v720p", "1080p", "v1080p", "up2x")
+
+
+# ---- BT.709 tagging on every delivered file ---------------------------------
+#
+# Every clip the panel hands the user is Rec.709 (HD primaries, sRGB-ish
+# transfer) — but nothing was SAYING so, and an untagged HD file is a player
+# coin-flip: QuickTime guesses one way, Chrome another, and the symptom users
+# report is "washed out" or "too contrasty" colour that isn't in the pixels.
+#
+# The output options alone are NOT enough on ffmpeg 8. The filtergraph's own
+# frame properties override `-color_primaries` / `-color_trc` / `-colorspace`,
+# and every export pass here has a `-vf`. Measured on both builds a user can
+# hit (8.0.1, Pinokio's bundled binary; 8.1.2, Homebrew), scaling 768×448 →
+# 1280×720:
+#
+#   flags only                  → primaries=bt709, transfer=unknown, matrix=unknown
+#   flags + trailing setparams  → primaries=bt709, transfer=bt709,   matrix=bt709
+#
+# So the filter is what actually lands the tags and the flags stay as the
+# container-level belt to its braces. `setparams` only writes metadata — no
+# pixel conversion, no re-scaling, no measurable cost.
+BT709_SETPARAMS = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+BT709_FLAGS = ["-color_primaries", "bt709", "-color_trc", "bt709",
+               "-colorspace", "bt709"]
+_FFMPEG_FILTER_CACHE: dict[str, bool] = {}
+
+
+def _ffmpeg_has_filter(name: str) -> bool:
+    """Whether the resolved ffmpeg build carries `name`. `setparams` has shipped
+    since 4.2 (2019) so this is all but always true — but an export pass is the
+    last step of a render that can cost half an hour, and an unknown filter is a
+    hard failure. One cached ~50 ms probe buys the fallback path."""
+    if name in _FFMPEG_FILTER_CACHE:
+        return _FFMPEG_FILTER_CACHE[name]
+    ok = False
+    try:
+        out = subprocess.run([str(FFMPEG), "-hide_banner", "-filters"],
+                             capture_output=True, text=True, timeout=15)
+        ok = any(line.split()[1:2] == [name]
+                 for line in (out.stdout or "").splitlines() if line.strip())
+    except Exception:      # noqa: BLE001 — a probe must never break a render
+        ok = False
+    _FFMPEG_FILTER_CACHE[name] = ok
+    return ok
+
+
+def bt709_vf(vf: str | None = None) -> str:
+    """`vf` with the BT.709 setparams filter appended (or it alone when there is
+    no other filtering to do). Returns `vf` untouched when the build lacks the
+    filter — the flags still tag primaries, which is what we had before."""
+    vf = (vf or "").strip().rstrip(",")
+    if not _ffmpeg_has_filter("setparams"):
+        return vf
+    return f"{vf},{BT709_SETPARAMS}" if vf else BT709_SETPARAMS
+
+
 def compute_upscale_plan(w: int, h: int, mode: str | None,
                           helper_did_model_upscale: bool = False) -> dict | None:
     """Plan a panel-side ffmpeg upscale pass. Returns None when no further
@@ -5803,11 +6164,17 @@ def compute_upscale_plan(w: int, h: int, mode: str | None,
     # upscale (Sharper) doubles them inside the helper before VAE decode.
     eff_w = w * 2 if helper_did_model_upscale else w
     eff_h = h * 2 if helper_did_model_upscale else h
-    if mode == "fit_720p":
-        # No crop, no distortion: fit inside standard 720p canvas and pad any
+    if mode in ("fit_720p", "fit_1080p"):
+        # No crop, no distortion: fit inside the standard canvas and pad any
         # remainder. 1024×576 fills 1280×720 exactly; 1280×704 becomes 1280×704
         # with 8px bars top/bottom; 704×1280 becomes 704×1280 with side bars.
-        if eff_w >= eff_h:
+        # H3's native 768×448 is 12:7, so it letterboxes into 16:9 — correct.
+        if mode == "fit_1080p":
+            if eff_w >= eff_h:
+                target_w, target_h, tag = 1920, 1080, "1080p"
+            else:
+                target_w, target_h, tag = 1080, 1920, "v1080p"
+        elif eff_w >= eff_h:
             target_w, target_h, tag = 1280, 720, "720p"
         else:
             target_w, target_h, tag = 720, 1280, "v720p"
@@ -6407,6 +6774,18 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     _h3_tier = (f("h3_tier", H3_TIER_DEFAULT) or H3_TIER_DEFAULT).strip().lower()
     if _h3_tier not in H3_TIERS:
         _h3_tier = H3_TIER_DEFAULT
+    # Post-render export canvas for an H3 clip (parity with LTX's `upscale`).
+    # Separate field because the LTX control is data-ltx-only in the UI and is
+    # neutralised below — reusing it would make one pill mean two things.
+    _h3_upscale = (f("h3_upscale", H3_UPSCALE_DEFAULT) or H3_UPSCALE_DEFAULT).strip().lower()
+    if _h3_upscale in ("native", ""):
+        _h3_upscale = "off"
+    if _h3_upscale in ("720p", "fit720p"):
+        _h3_upscale = "fit_720p"
+    if _h3_upscale in ("1080p", "fit1080p"):
+        _h3_upscale = "fit_1080p"
+    if _h3_upscale not in H3_UPSCALE_MODES:
+        _h3_upscale = H3_UPSCALE_DEFAULT
     if _engine == "h3":
         if mode_in not in H3_MODES:
             push(f"engine=h3 requested for mode={mode_in!r} — Hailuo H3 only "
@@ -6417,6 +6796,18 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                  f"{SYSTEM_RAM_GB:.0f} GB unified memory (needs "
                  f"{H3_MIN_RAM_GB:.0f}+) — falling back to LTX.")
             _engine = "ltx"
+        elif (int((H3_TIERS[_h3_tier].get("chain_windows") or 1)) > 1
+                and h3_available() and not h3_supports_chain()):
+            # Chained tiers need --chain-windows on the INSTALLED runner. An
+            # older pack renders 3 s / 5 s fine, so fall back to the longest
+            # single-pass tier rather than failing the job outright.
+            _fallback = next(
+                (k for k, t in reversed(list(H3_TIERS.items()))
+                 if int(t.get("chain_windows") or 1) <= 1), H3_TIER_DEFAULT)
+            push(f"h3_tier={_h3_tier!r} needs window chaining, which this H3 "
+                 f"checkout doesn't have (no --chain-windows). Update the H3 "
+                 f"pack; rendering {_fallback!r} instead.")
+            _h3_tier = _fallback
 
     job = {
         "id": _new_job_id(),
@@ -6436,6 +6827,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # (see CLAUDE.md and the restore/ingredients/control notes below).
             "engine": _engine,
             "h3_tier": _h3_tier,
+            # Export canvas for the H3 post-process (off / fit_720p /
+            # fit_1080p). SAME allowlist trap as every key in this dict: a new
+            # form field that isn't listed here silently no-ops on /queue/add.
+            "h3_upscale": _h3_upscale,
             "prompt": prompt,
             "negative_prompt": f("negative_prompt", ""),
             "width": max(32, int(f("width", str(default_w)) or default_w)),
@@ -6567,11 +6962,17 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         _tier_cfg = H3_TIERS[_h3_tier]
         job["params"]["width"] = _tier_cfg["width"]
         job["params"]["height"] = _tier_cfg["height"]
+        # DELIVERED frames — for a chained tier that is the stitched total, not
+        # the per-window count, so the queue card and the duration line read the
+        # clip the user actually gets. run_h3_job_inner splits it back out.
         job["params"]["frames"] = _tier_cfg["frames"]
         job["params"]["steps"] = _tier_cfg["steps"]
+        job["params"]["h3_chain_windows"] = int(_tier_cfg.get("chain_windows") or 1)
+        job["params"]["h3_window_frames"] = int(
+            _tier_cfg.get("window_frames") or _tier_cfg["frames"])
         # LTX-only post-processing has no meaning for an H3 render: the runner
-        # writes its own muxed mp4 at native size. Neutralise them so the
-        # sidecar (and the ⓘ modal) don't claim an upscale that never ran.
+        # writes its own muxed mp4 and none of the LTX helper knobs apply.
+        # `h3_upscale` above carries the H3 export target instead.
         job["params"]["upscale"] = "off"
         job["params"]["temporal_mode"] = "native"
         job["params"]["accel"] = "off"
@@ -7753,11 +8154,17 @@ def run_h3_job_inner(job: dict) -> None:
             f"{SYSTEM_RAM_GB:.0f} GB. Render on the LTX engine instead.")
     if paths["missing"]:
         raise RuntimeError(
-            "The Hailuo H3 pack isn't installed — missing: "
-            + "; ".join(paths["missing"])
-            + ". Install it from the Phosphene sidebar in Pinokio "
-              "('Install Hailuo H3'), or point LTX_H3_ROOT / LTX_H3_MODELS at "
-              "an existing checkout.")
+            ("The Hailuo H3 weights are on disk but the engine needs repair — "
+             if paths["repairable"] else
+             "The Hailuo H3 pack isn't installed — ")
+            + "missing: " + "; ".join(paths["missing"])
+            + (". Click 'Install Hailuo H3' in the Phosphene sidebar in "
+               "Pinokio — it is idempotent and skips every weight already on "
+               "disk, so this is a couple of minutes, NOT a 75 GB download."
+               if paths["repairable"] else
+               ". Install it from the Phosphene sidebar in Pinokio "
+               "('Install Hailuo H3'), or point LTX_H3_ROOT / LTX_H3_MODELS at "
+               "an existing checkout."))
     if mode not in H3_MODES:
         raise RuntimeError(
             f"Hailuo H3 doesn't serve mode {mode!r} — only "
@@ -7767,8 +8174,28 @@ def run_h3_job_inner(job: dict) -> None:
     tier = H3_TIERS.get(tier_key) or H3_TIERS[H3_TIER_DEFAULT]
     width = int(p.get("width") or tier["width"])
     height = int(p.get("height") or tier["height"])
+    # `frames` is what the clip DELIVERS. A chained tier renders it as N
+    # windows of `window_frames` each and the runner stitches them, dropping
+    # the duplicated join frame — so N windows deliver
+    # window_frames + (N-1)*(window_frames-1), trimmed to `frames`.
     frames = int(p.get("frames") or tier["frames"])
     steps = int(p.get("steps") or tier["steps"])
+    chain_windows = int(p.get("h3_chain_windows") or tier.get("chain_windows") or 1)
+    window_frames = int(p.get("h3_window_frames") or tier.get("window_frames") or frames)
+    if chain_windows > 1:
+        if not h3_supports_chain():
+            raise RuntimeError(
+                f"The {tier['label']} tier renders as {chain_windows} chained "
+                f"windows, but this H3 checkout has no `--chain-windows` "
+                f"({paths['runner']}). Update the H3 pack, or pick a 3 s / 5 s "
+                f"tier.")
+        _max_frames = window_frames + (chain_windows - 1) * (window_frames - 1)
+        if not 1 <= frames <= _max_frames:
+            # Belt and braces: the runner rejects an out-of-range trim with a
+            # parser error, which would read as a mystery crash in the log.
+            frames = _max_frames
+    else:
+        window_frames = frames
     prompt = (p.get("prompt") or "").strip()
     if not prompt:
         raise RuntimeError("H3 needs a prompt — dialogue and sound are "
@@ -7832,12 +8259,21 @@ def run_h3_job_inner(job: dict) -> None:
         "--text-config", str(paths["text_config"]),
         "-o", str(out_path),
         "--metrics", str(metrics_path),
-        "--frames", str(frames),
+        # Per-WINDOW frame count. Identical to `frames` on every single-pass
+        # tier; on a chained tier it is the 5 s window the chain repeats.
+        "--frames", str(window_frames),
         "--height", str(height),
         "--width", str(width),
         "--steps", str(steps),
         "--seed", str(seed),
     ]
+    if chain_windows > 1:
+        # Window chaining: each window after the first is conditioned on its
+        # predecessor's last decoded frame, and --chain-total-frames trims the
+        # stitched clip to the tier's delivered length. The audio cross-fade
+        # defaults to one frame (the chain's real overlap) in the runner.
+        cmd += ["--chain-windows", str(chain_windows),
+                "--chain-total-frames", str(frames)]
     if first_frame is not None:
         cmd += ["--first-frame", str(first_frame)]
 
@@ -7849,7 +8285,11 @@ def run_h3_job_inner(job: dict) -> None:
 
     push(f"[h3] {tier['label']} · {width}×{height} · {frames}f · "
          f"{steps} sigma points ({steps - 1} forwards) · seed {seed}"
+         + (f" · {chain_windows} chained windows of {window_frames}f"
+            if chain_windows > 1 else "")
          + (f" · first frame {first_frame.name}" if first_frame else ""))
+    if chain_windows > 1 and tier.get("note"):
+        push(f"[h3] note: {tier['note']}")
     push("[h3] $ " + " ".join(shlex.quote(c) for c in cmd))
 
     t0 = time.time()
@@ -7862,6 +8302,13 @@ def run_h3_job_inner(job: dict) -> None:
     proc: subprocess.Popen | None = None
     step_rx = re.compile(r"^step (\d+)/(\d+):")
     phase_rx = re.compile(r"^== (.+) ==$")
+    # A chained run prints `### window 2/3 ###` between windows and prefixes
+    # every phase name with `w2_`. Without both, the progress bar would run
+    # 5→92% and then jump back to 5% once per window, and the phase label would
+    # read "w2_joint_denoise" instead of English.
+    window_rx = re.compile(r"^#+ window (\d+)/(\d+) #+$")
+    window_prefix_rx = re.compile(r"^w(\d+)_")
+    cur_window, tot_windows = 1, max(1, chain_windows)
     phase_label = "Loading H3 text encoder"
     last_step, total_steps = 0, max(1, steps - 1)
     try:
@@ -7880,14 +8327,34 @@ def run_h3_job_inner(job: dict) -> None:
         with LOCK:
             STATE["pid"] = proc.pid
             STATE["h3_pgid"] = os.getpgid(proc.pid)
+        # Crash guard — see reap_orphan_subprocesses(). start_new_session means
+        # a SIGKILLed panel leaves this 40 GiB render running; the next boot
+        # reaps it from this file before the queue resumes the same job.
+        _proc_guard_write("h3", proc.pid, os.getpgid(proc.pid),
+                          note=f"job {job['id']}")
         assert proc.stdout is not None
         for raw in proc.stdout:
             line = raw.rstrip("\n")
             if not line.strip():
                 continue
             push(f"[h3] {line}")
+            m_window = window_rx.match(line.strip())
+            if m_window:
+                try:
+                    cur_window = max(1, int(m_window.group(1)))
+                    tot_windows = max(cur_window, int(m_window.group(2)))
+                except (TypeError, ValueError):
+                    pass
+                # Reset the per-window clocks: the step counter restarts at 1
+                # for every window, and the denoise clock has to restart with
+                # it or the ETA prices this window off the previous one's load.
+                denoise_t0 = None
+                last_step = 0
             m_phase = phase_rx.match(line.strip())
             if m_phase:
+                raw_phase = m_phase.group(1).strip()
+                # `w2_joint_denoise` → `joint_denoise` on a chained run.
+                bare_phase = window_prefix_rx.sub("", raw_phase)
                 phase_label = {
                     "text_encode_q8": "Encoding prompt (Q8 text encoder)",
                     "text_cache_load": "Loading cached prompt embedding",
@@ -7898,8 +8365,9 @@ def run_h3_job_inner(job: dict) -> None:
                     "video_vae_decode": "Decoding video",
                     "audio_vae_decode": "Decoding audio",
                     "encode_mux": "Encoding mp4",
-                }.get(m_phase.group(1).strip(), m_phase.group(1).strip())
-                if m_phase.group(1).strip() == "joint_denoise":
+                    "stitch": "Stitching windows",
+                }.get(bare_phase, bare_phase)
+                if bare_phase == "joint_denoise":
                     denoise_t0 = time.time()
             m_step = step_rx.match(line.strip())
             if m_step:
@@ -7910,16 +8378,25 @@ def run_h3_job_inner(job: dict) -> None:
                     pass
             elapsed = time.time() - t0
             # Denoise dominates wall time; give it the 5–92% band so the bar
-            # doesn't sit at 0 through a 30 s model load and then jump.
+            # doesn't sit at 0 through a 30 s model load and then jump. On a
+            # chained run the band is split evenly across windows — each window
+            # is the same shape and measured within 0.3% of the others, so
+            # "window 2 of 3, step 4/8" is a real fraction of the whole clip.
+            win_span = 87.0 / float(tot_windows)
+            win_base = 5.0 + win_span * (cur_window - 1)
+            win_tag = f"Window {cur_window}/{tot_windows} · " if tot_windows > 1 else ""
             if last_step:
-                pct = 5.0 + 87.0 * (last_step / float(total_steps))
+                pct = win_base + win_span * (last_step / float(total_steps))
                 spent = elapsed if denoise_t0 is None else max(0.0, time.time() - denoise_t0)
                 per_step = spent / max(1, last_step)
-                eta = max(0.0, (total_steps - last_step) * per_step)
-                label = f"{phase_label} · step {last_step} / {total_steps}"
+                # Remaining steps in this window, plus every step of every
+                # window still to come.
+                left = (total_steps - last_step) + total_steps * (tot_windows - cur_window)
+                eta = max(0.0, left * per_step)
+                label = f"{win_tag}{phase_label} · step {last_step} / {total_steps}"
             else:
-                pct, eta = 3.0, 0.0
-                label = phase_label
+                pct, eta = max(3.0, win_base), 0.0
+                label = f"{win_tag}{phase_label}"
             with LOCK:
                 cur = STATE.get("current")
                 if cur and cur.get("id") == job["id"]:
@@ -7931,12 +8408,15 @@ def run_h3_job_inner(job: dict) -> None:
                         "eta_sec": eta,
                         "denoise_step": last_step,
                         "denoise_total": total_steps,
+                        "window": cur_window,
+                        "window_total": tot_windows,
                     }
         rc = proc.wait()
         proc = None
         with LOCK:
             STATE["pid"] = None
             STATE["h3_pgid"] = None
+        _proc_guard_clear("h3")
         if rc != 0:
             raise RuntimeError(
                 f"H3 render exited with code {rc} — see the log above for the "
@@ -7957,10 +8437,55 @@ def run_h3_job_inner(job: dict) -> None:
             with LOCK:
                 STATE["pid"] = None
                 STATE["h3_pgid"] = None
+            _proc_guard_clear("h3")
 
     if not out_path.is_file():
         raise RuntimeError(
             f"H3 finished but no file landed at {out_path} — check the log.")
+
+    # ---- export pass: the SAME post-process an LTX render gets ------------
+    # H3 writes 768×448 (12:7), which is neither 720p nor 1080p and looks like
+    # a bug next to LTX output in the gallery. Run the identical ffmpeg recipe:
+    # lanczos fit inside the canvas, pad the remainder, re-encode with the
+    # user's codec settings, audio copied through untouched. Letterboxing 12:7
+    # into 16:9 is the correct answer — no crop, no distortion. The native file
+    # stays on disk but hidden from the gallery, exactly like the LTX path.
+    native_path = out_path
+    final_target = out_path
+    h3_upscale_mode = (p.get("h3_upscale") or H3_UPSCALE_DEFAULT).strip().lower()
+    if h3_upscale_mode not in H3_UPSCALE_MODES:
+        h3_upscale_mode = H3_UPSCALE_DEFAULT
+    upscale_plan = None
+    try:
+        upscale_plan = compute_upscale_plan(width, height, h3_upscale_mode)
+    except RuntimeError as exc:
+        push(f"[h3] export target ignored: {exc}")
+    if upscale_plan:
+        codec = output_codec_settings()
+        export_preset = os.environ.get("LTX_UPSCALE_PRESET", "medium")
+        upscaled_out = OUTPUT / (
+            f"{out_path.stem}_{upscale_plan['tag']}{out_path.suffix}")
+        run_ffmpeg_tracked([
+            str(FFMPEG), "-y", "-i", str(out_path),
+            "-vf", bt709_vf(upscale_plan["vf"]),
+            "-c:v", "libx264", "-pix_fmt", codec["pix_fmt"], "-crf", codec["crf"],
+            "-preset", export_preset,
+            *BT709_FLAGS,
+            "-movflags", "+faststart",
+            # H3 generates its own AAC track; re-encoding it would only lose
+            # fidelity, and the dialogue is the point of the engine.
+            "-c:a", "copy",
+            str(upscaled_out),
+        ], "H3 export")
+        upscale_plan["method"] = "ffmpeg_lanczos"
+        final_target = upscaled_out
+        push(f"[h3] export done → {upscaled_out.name} "
+             f"({upscale_plan['target_w']}×{upscale_plan['target_h']}, no crop, "
+             f"{codec['pix_fmt']} crf {codec['crf']}, preset={export_preset})")
+        set_hidden(str(native_path), True)
+        push(f"[h3] native source kept but hidden from gallery → {native_path.name}")
+        job["native_path"] = str(native_path)
+        job["upscaled_path"] = str(final_target)
 
     # ---- metrics → sidecar ----------------------------------------------
     metrics: dict = {}
@@ -7971,14 +8496,23 @@ def run_h3_job_inner(job: dict) -> None:
     elapsed = round(time.time() - t0, 2)
     phases = {ph.get("name"): ph for ph in (metrics.get("phases") or [])
               if isinstance(ph, dict)}
+    # A chained run reports per-window keys (w1_packed_rows, …) and no bare
+    # ones, because every window has its own row count. Fall back to window 1
+    # so the ⓘ modal shows a number instead of an empty field.
+    def _metric(name: str):
+        val = metrics.get(name)
+        return metrics.get(f"w1_{name}") if val is None else val
+
     sidecar = {
-        "output": str(out_path),
-        "raw_output": str(out_path),
+        "output": str(final_target),
+        "raw_output": str(native_path),
+        "native_output": str(native_path),
         "params": {
             **p,
             "engine": "h3",
             "h3_tier": tier["key"],
             "h3_tier_label": tier["label"],
+            "h3_upscale": h3_upscale_mode,
             "width": width, "height": height, "frames": frames, "steps": steps,
             "seed_used": seed,
             "image": str(first_frame) if first_frame else None,
@@ -7991,25 +8525,36 @@ def run_h3_job_inner(job: dict) -> None:
         "fps": H3_FPS,
         "model": str(paths["dit"]),
         "queue_id": job["id"],
+        "output_codec": output_codec_settings(),
         "h3": {
             "tier": tier["key"],
             "runner": str(paths["runner"]),
             "metrics_path": str(metrics_path),
-            "packed_rows": metrics.get("packed_rows"),
-            "prompt_tokens": metrics.get("prompt_tokens"),
+            "packed_rows": _metric("packed_rows"),
+            "prompt_tokens": _metric("prompt_tokens"),
             "total_seconds": metrics.get("total_seconds"),
             "mean_denoise_step_seconds": metrics.get("mean_denoise_step_seconds"),
             "phase_seconds": {k: v.get("seconds") for k, v in phases.items()},
             "peak_gib": max([v.get("peak_gib") or 0 for v in phases.values()] or [0]),
             "first_frame": str(first_frame) if first_frame else None,
+            "chain_windows": chain_windows,
+            "window_frames": window_frames,
+            "delivered_frames": metrics.get("delivered_frames", frames),
+            "windows": metrics.get("windows"),
+            "seams": len(metrics.get("seams") or []) if chain_windows > 1 else 0,
         },
     }
-    write_sidecar(out_path.with_suffix(out_path.suffix + ".json"), sidecar)
-    job["output_path"] = str(out_path)
+    if upscale_plan:
+        sidecar["upscale"] = (
+            {k: v for k, v in upscale_plan.items() if k != "vf"}
+            | {"source": str(native_path), "codec": output_codec_settings()}
+        )
+    write_sidecar(final_target.with_suffix(final_target.suffix + ".json"), sidecar)
+    job["output_path"] = str(final_target)
     p["elapsed_seconds"] = elapsed
-    push(f"[h3] done in {elapsed}s → {out_path.name}")
+    push(f"[h3] done in {elapsed}s → {final_target.name}")
     if p.get("open_when_done"):
-        subprocess.run(["open", str(out_path)], check=False)
+        subprocess.run(["open", str(final_target)], check=False)
 
 
 def run_job_inner(job: dict) -> None:
@@ -9308,11 +9853,15 @@ def run_job_inner(job: dict) -> None:
         mux_crf = codec["crf"]
         mux_cmd = [str(FFMPEG), "-y", "-i", str(raw_out), "-i", audio,
                    "-map", "0:v:0", "-map", "1:a:0"]
-        if pad_filter:
-            mux_cmd += ["-vf", pad_filter]
+        # bt709_vf returns "" only on an ffmpeg build with no `setparams` AND no
+        # pad to do — `-vf ""` is an error, so the flag goes in conditionally.
+        _mux_vf = bt709_vf(pad_filter)
+        if _mux_vf:
+            mux_cmd += ["-vf", _mux_vf]
         mux_cmd += [
             "-af", f"apad,atrim=0:{duration},asetpts=PTS-STARTPTS",
             "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf, "-preset", "medium",
+            *BT709_FLAGS,
             "-movflags", "+faststart",
             "-c:a", "aac", "-b:a", "192k",
             "-t", f"{duration}",
@@ -9328,9 +9877,10 @@ def run_job_inner(job: dict) -> None:
         temporal_preset = os.environ.get("LTX_TEMPORAL_PRESET", "medium")
         temporal_cmd = [
             str(FFMPEG), "-y", "-i", str(final_target),
-            "-vf", f"minterpolate=fps={FPS}:mi_mode=mci:mc_mode=aobmc:vsbmc=1",
+            "-vf", bt709_vf(f"minterpolate=fps={FPS}:mi_mode=mci:mc_mode=aobmc:vsbmc=1"),
             "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf,
             "-preset", temporal_preset,
+            *BT709_FLAGS,
             "-movflags", "+faststart",
             "-c:a", "copy",
             "-t", f"{video_duration(frames)}",
@@ -9380,9 +9930,10 @@ def run_job_inner(job: dict) -> None:
         else:
             upscale_cmd = [
                 str(FFMPEG), "-y", "-i", str(final_target),
-                "-vf", upscale_plan["vf"],
+                "-vf", bt709_vf(upscale_plan["vf"]),
                 "-c:v", "libx264", "-pix_fmt", mux_pix_fmt, "-crf", mux_crf,
                 "-preset", upscale_preset,
+                *BT709_FLAGS,
                 "-movflags", "+faststart",
                 "-c:a", "copy",
                 str(upscaled_out),
@@ -11473,7 +12024,6 @@ class Handler(BaseHTTPRequestHandler):
                 # variant has a `.json`. Bounded to the same OUTPUT/
                 # UPLOADS roots so this can't be tricked into leaking
                 # arbitrary `.json` files.
-                UPSCALE_TAGS = ("720p", "v720p", "up2x")
                 stem = path.stem
                 ext = path.suffix
                 parent = path.parent
@@ -13460,12 +14010,12 @@ class Handler(BaseHTTPRequestHandler):
             #   (a) sidecar JSON of the clicked file (raw_output /
             #       native_output / output / upscaled_output fields),
             #   (b) filename heuristic — strip the known upscale-suffix
-            #       (`_720p`, `_v720p`, `_up2x`) from the stem to get the
-            #       raw, and append each suffix to get any companion
-            #       upscaled file that exists.
+            #       (`_720p`, `_v720p`, `_1080p`, `_v1080p`, `_up2x`) from the
+            #       stem to get the raw, and append each suffix to get any
+            #       companion upscaled file that exists.
             # Each candidate's matching sidecars (`<full>.json` and
-            # `<stem>.json`) come along too.
-            UPSCALE_TAGS = ("720p", "v720p", "up2x")
+            # `<stem>.json`) come along too. UPSCALE_TAGS is module-level so
+            # this list and compute_upscale_plan's tags can never drift.
 
             def _add(seen: set, candidates: list, cand: Path) -> None:
                 key = str(cand)
@@ -17493,6 +18043,19 @@ HTML = r"""<!doctype html>
        above already beats the grid rule (that fight was lost once already,
        2026-05-17, when both quality strips showed at the same time). */
     body[data-h3-engine="h3"] [data-ltx-only] { display: none !important; }
+    /* …and the mirror image: controls that only mean something to H3 (its
+       export canvas, the chained-tier artefact note) stay folded away on LTX.
+       `[hidden]` still wins for the ones JS toggles individually. */
+    body:not([data-h3-engine="h3"]) [data-h3-only] { display: none !important; }
+    [data-h3-only][hidden] { display: none !important; }
+    .h3-export-row {
+      display: flex; align-items: center; gap: 10px;
+      margin: 6px 0 8px 0; padding: 0 2px;
+    }
+    .h3-export-row > span.h3-export-label {
+      font-size: 11px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: .4px; font-weight: 600; flex: 0 0 auto;
+    }
 
     /* Customize disclosure inside the form — sub-tier UI, lighter than
        a top-level <details>. Subtle border, indented body, distinct
@@ -21984,6 +22547,33 @@ HTML = r"""<!doctype html>
                table stays the single source of truth for geometry + steps, so
                a tier change is one Python edit, not two). -->
           <div class="quality-strip pill-group" id="h3TierGroup" hidden></div>
+          <!-- Honest artefact note for the chained tiers. Rendered from the
+               tier's `note` field (server-side H3_TIERS), so the day per-window
+               prompts land in the UI the warning disappears with one Python
+               edit. Hidden for tiers that render as a single pass. -->
+          <div class="engine-hint" id="h3TierNote" data-h3-only hidden></div>
+          <!-- H3 export canvas. H3 renders 768×448 (12:7) natively, which is
+               neither 720p nor 1080p; this runs the SAME lanczos-fit + pad +
+               libx264 pass an LTX render gets, keeping the native file on disk
+               but hidden from the gallery. Letterbox bars on 12:7 content are
+               correct — no crop, no distortion. The hidden input is inside
+               genForm so FormData carries it; `h3_upscale` is in the make_job
+               allowlist (an unlisted field silently no-ops on /queue/add). -->
+          <div class="h3-export-row" id="h3ExportRow" data-h3-only>
+            <span class="h3-export-label">Export</span>
+            <div class="pill-group" id="h3UpscaleGroup" style="display:flex;gap:4px;flex:0 0 auto;">
+              <button type="button" class="pill-btn" data-h3-upscale="off"
+                      style="padding:4px 10px;font-size:12px;"
+                      title="Ship H3's native 768×448 with no post-process.">Native</button>
+              <button type="button" class="pill-btn active" data-h3-upscale="fit_720p"
+                      style="padding:4px 10px;font-size:12px;"
+                      title="Fit inside 1280×720 and pad — no crop, no distortion.">720p</button>
+              <button type="button" class="pill-btn" data-h3-upscale="fit_1080p"
+                      style="padding:4px 10px;font-size:12px;"
+                      title="Fit inside 1920×1080 and pad — no crop, no distortion.">1080p</button>
+            </div>
+          </div>
+          <input type="hidden" name="h3_upscale" id="h3_upscale" value="fit_720p">
           <!-- 2026-05-17 (Codex C+ pass 6): the character-only skip-step
                toggle moved out of here into the Customize section as
                "HQ speed". It's a Q8 sampler control, not a character
@@ -28953,6 +29543,19 @@ function setAspect(a) {
 function updateCustomizeSummary() {
   const el = document.getElementById('customizeSummary');
   if (!el) return;
+  // H3 renders on its own geometry and its own export control; every LTX knob
+  // summarised below is folded away in that state, so summarising them would
+  // describe a render that isn't happening.
+  if (document.body.dataset.h3Engine === 'h3') {
+    const tier = h3TierByKey((document.getElementById('h3_tier') || {}).value);
+    const up = (document.getElementById('h3_upscale') || {}).value || 'off';
+    const parts = [tier ? tier.spec : 'Hailuo H3'];
+    if (up === 'fit_720p') parts.push('720p export');
+    else if (up === 'fit_1080p') parts.push('1080p export');
+    else parts.push('native export');
+    el.textContent = parts.join(' · ');
+    return;
+  }
   const q = document.getElementById('quality').value;
   const w = parseInt(document.getElementById('width').value || 0);
   const h = parseInt(document.getElementById('height').value || 0);
@@ -29081,7 +29684,31 @@ function h3TierByKey(key) {
   let saved = null;
   try { saved = localStorage.getItem('phos_h3_tier'); } catch (e) {}
   if (saved && h3TierByKey(saved) && h3TierByKey(saved).key === saved) inp.value = saved;
+  // Same treatment for the export canvas, and for the same reason.
+  const up = document.getElementById('h3_upscale');
+  if (!up) return;
+  let savedUp = null;
+  try { savedUp = localStorage.getItem('phos_h3_upscale'); } catch (e) {}
+  const allowed = H3.upscale_modes || ['off', 'fit_720p', 'fit_1080p'];
+  if (savedUp && allowed.indexOf(savedUp) !== -1) up.value = savedUp;
 })();
+
+// Export canvas for an H3 render. Separate from the LTX `upscale` control
+// (which is data-ltx-only and folds away on H3) so one pill never means two
+// things. Server-side make_job re-validates — a stale tab must never win.
+function setH3Upscale(mode) {
+  const allowed = H3.upscale_modes || ['off', 'fit_720p', 'fit_1080p'];
+  const v = allowed.indexOf(mode) !== -1 ? mode : (H3.default_upscale || 'fit_720p');
+  const inp = document.getElementById('h3_upscale');
+  if (inp) inp.value = v;
+  document.querySelectorAll('#h3UpscaleGroup [data-h3-upscale]').forEach(b =>
+    b.classList.toggle('active', b.dataset.h3Upscale === v));
+  try { localStorage.setItem('phos_h3_upscale', v); } catch (e) {}
+  if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+}
+document.querySelectorAll('#h3UpscaleGroup [data-h3-upscale]').forEach(b => {
+  b.onclick = () => setH3Upscale(b.dataset.h3Upscale);
+});
 
 function _engineRowVisible() {
   // Only Macs that could actually run H3 see the picker at all. Showing a
@@ -29094,7 +29721,11 @@ function renderH3Tiers() {
   if (!strip) return;
   const tiers = H3.tiers || [];
   const active = (document.getElementById('h3_tier') || {}).value || H3.default_tier;
-  strip.style.gridTemplateColumns = `repeat(${Math.max(1, tiers.length)}, 1fr)`;
+  // Five tiers in one row would squeeze "768×448 · 362f · 3×5s" into ~50 px.
+  // Past four, wrap to three per row — the chips keep their legible width and
+  // the strip grows a second line instead of shrinking its type.
+  const cols = tiers.length > 4 ? 3 : Math.max(1, tiers.length);
+  strip.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
   strip.innerHTML = tiers.map(t => `
     <button type="button" class="q-chip pill-btn pill-quality${t.key === active ? ' active' : ''}"
             data-h3-tier="${escapeHtml(t.key)}" title="${escapeHtml(t.blurb || '')}">
@@ -29125,6 +29756,15 @@ function setH3Tier(key) {
   if (h) h.value = tier.height;
   if (f) f.value = tier.frames;
   if (s) s.value = tier.steps;
+  // Chained tiers carry an honest artefact note (one prompt is asked of every
+  // window, so a scripted line lands once per window). Surface it where the
+  // user is choosing, not in a tooltip.
+  const noteEl = document.getElementById('h3TierNote');
+  if (noteEl) {
+    const n = tier.note || '';
+    noteEl.textContent = n;
+    noteEl.hidden = !n;
+  }
   try { localStorage.setItem('phos_h3_tier', tier.key); } catch (e) {}
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
 }
@@ -29151,7 +29791,15 @@ function setEngine(engine, opts) {
 
   if (target === 'h3') {
     if (!H3.capable) { target = 'ltx'; reason = 'Hailuo H3 needs 64 GB unified memory.'; }
-    else if (!H3.available) { target = 'ltx'; reason = 'Hailuo H3 isn\'t installed yet.'; }
+    else if (!H3.available) {
+      target = 'ltx';
+      // Distinguish "you never installed this" from "you DID install this and
+      // something broke it". Telling a user with 75 GB of H3 weights on disk
+      // that H3 "isn't installed" is the v3.4.0 regression report, verbatim.
+      reason = H3.repairable
+        ? 'Hailuo H3 needs repair — your weights are still on disk. Click the pill.'
+        : 'Hailuo H3 isn\'t installed yet.';
+    }
     else if (!_h3ServesMode(currentMode)) {
       target = 'ltx';
       reason = 'Hailuo H3 renders Text and Image only — back on LTX-2.3 for this mode.';
@@ -29175,11 +29823,14 @@ function setEngine(engine, opts) {
     chipH3.title = !H3.capable
       ? 'Needs 64 GB unified memory'
       : (!H3.available
-          ? 'Hailuo H3 isn\'t installed — click to see how (~75 GB)'
+          ? (H3.repairable
+              ? 'Hailuo H3 needs repair — weights are on disk, click for the one-click fix'
+              : 'Hailuo H3 isn\'t installed — click to see how (~75 GB)')
           : 'Hailuo H3 — joint video + dialogue + sound. Text and Image only.');
   }
-  if (sub) sub.textContent = (H3.capable && !H3.available) ? 'not installed · ~75 GB'
-                                                          : 'video + dialogue';
+  if (sub) sub.textContent = (H3.capable && !H3.available)
+    ? (H3.repairable ? 'needs repair · weights kept' : 'not installed · ~75 GB')
+    : 'video + dialogue';
   if (note) note.textContent = reason;
 
   // Surface swap: H3 tier strip replaces the quality strip; data-ltx-only
@@ -29193,6 +29844,8 @@ function setEngine(engine, opts) {
   if (target === 'h3') {
     renderH3Tiers();
     setH3Tier((document.getElementById('h3_tier') || {}).value || H3.default_tier);
+    setH3Upscale((document.getElementById('h3_upscale') || {}).value
+                 || H3.default_upscale || 'fit_720p');
     // LTX post-processing doesn't run on an H3 render (make_job neutralises
     // all three server-side). Mirror that in the UI or the derived line lies:
     // it was reading "768×448 → 1280×720 fit" for a render that ships 768×448.
@@ -29249,7 +29902,15 @@ function updateH3Availability(s) {
   if (!next) return;
   const changed = (next.available !== H3.available)
                || (next.capable !== H3.capable)
-               || (next.first_frame !== H3.first_frame);
+               || (next.first_frame !== H3.first_frame)
+               // `chain` gates the 10 s / 15 s tiers, so the strip has to be
+               // re-rendered when an H3 pack update brings --chain-windows in.
+               || (next.chain !== H3.chain)
+               // Install→repair→install flips the pill's copy and the models
+               // card even when `available` itself hasn't moved yet.
+               || (next.repairable !== H3.repairable)
+               || (next.reason !== H3.reason)
+               || ((next.tiers || []).length !== (H3.tiers || []).length);
   H3 = next;
   if (changed) setEngine(currentEngine(), { persist: false });
 }
@@ -29272,7 +29933,30 @@ function openH3InstallCard() {
   const body = document.getElementById('h3InstallBody');
   if (body) {
     const missing = (H3.missing || []);
-    body.innerHTML = `
+    // REPAIR is a different story from INSTALL and has to read like one. A
+    // user whose 75 GB of weights are still on disk must not be shown a "~75
+    // GB download" card — that is what made the v3.4.0 report read as "H3
+    // vanished and Reset didn't bring it back".
+    const intro = H3.repairable ? `
+      <p style="margin:0 0 10px">
+        <b>Hailuo H3 is installed — it just needs repairing.</b> Your weights
+        (~75 GB) are still on disk and are <em>not</em> re-downloaded.
+      </p>
+      <p style="margin:0 0 10px;color:var(--muted)">
+        ${H3.venv_broken
+            ? 'What broke: H3’s Python environment points at Pinokio’s shared '
+              + 'managed interpreter, and installing another pack moved it. '
+              + 'Rebuilding the environment takes about two minutes.'
+            : 'What broke: the engine’s code checkout is missing or incomplete. '
+              + 'Re-cloning it takes about a minute.'}
+      </p>
+      <p style="margin:0 0 10px">
+        Fix it from Pinokio: open the <b>Phosphene</b> entry in the Pinokio
+        sidebar and click <b>“Repair Hailuo H3”</b> (it appears in place of the
+        install entry). The step is idempotent — it skips every weight already
+        on disk. The panel picks the engine back up within a couple of seconds,
+        no restart.
+      </p>` : `
       <p style="margin:0 0 10px">
         <b>Hailuo H3</b> is a second video engine: one prompt in, video
         <em>and</em> synced dialogue <em>and</em> sound out. It runs fully
@@ -29287,7 +29971,8 @@ function openH3InstallCard() {
         in the Pinokio sidebar and click
         <b>“Install Hailuo H3 (optional, ~75 GB)”</b>. The panel picks it up
         within a couple of seconds — no restart.
-      </p>
+      </p>`;
+    body.innerHTML = intro + `
       ${missing.length ? `<p style="margin:0;color:var(--muted);font-size:12px">
         Currently missing: ${escapeHtml(missing.join('; '))}</p>` : ''}`;
   }
@@ -31903,6 +32588,20 @@ function renderOutputInfoBody(path, data) {
     const label = isSharp ? `${baseLabel} · Sharp (PiperSR)` : `${baseLabel} · Fast (Lanczos)`;
     genRows.push(`<dt>Upscale</dt><dd>${escapeHtml(label + target)}</dd>`);
   }
+  // H3's own export pass. `p.upscale` is always 'off' on an H3 render (the LTX
+  // knobs are neutralised server-side), so it needs its own row rather than
+  // silently claiming no post-process happened.
+  if (p.h3_upscale && p.h3_upscale !== 'off') {
+    const up = data.upscale || {};
+    const target = up.target_w && up.target_h ? ` → ${up.target_w} × ${up.target_h}` : '';
+    const base = p.h3_upscale === 'fit_1080p' ? '1080p fit (no crop)' : '720p fit (no crop)';
+    genRows.push(`<dt>Export</dt><dd>${escapeHtml(base + ' · Fast (Lanczos)' + target)}</dd>`);
+  }
+  // Chained windows — the honest shape of a 10 s / 15 s H3 clip.
+  if (data.h3 && Number(data.h3.chain_windows || 1) > 1) {
+    const c = data.h3;
+    genRows.push(`<dt>Chained</dt><dd>${escapeHtml(String(c.chain_windows))} × ${escapeHtml(String(c.window_frames))}f windows → ${escapeHtml(String(c.delivered_frames || p.frames || '—'))}f · ${escapeHtml(String(c.seams || (c.chain_windows - 1)))} join(s)</dd>`);
+  }
   const codec = data.output_codec || (data.upscale && data.upscale.codec);
   if (codec && codec.pix_fmt && codec.crf != null) {
     const preset = codec.preset ? ` · ${codec.preset}` : '';
@@ -32296,6 +32995,33 @@ function updateModelsCard(s) {
     actions.innerHTML = (s.hf_available ?? true)
       ? `<button onclick="startDownload('q8')">Download Q8 (37 GB)</button>`
       : `<button disabled>hf missing</button>`;
+    return;
+  }
+
+  // ----- Hailuo H3 installed but broken → one-click repair -----------------
+  // `repairable` means the ~75 GB of H3 weights ARE on disk and only the
+  // clone/venv needs rebuilding. The overwhelmingly common cause: H3's venv
+  // interpreter is a symlink chain into Pinokio's SHARED uv-managed Python,
+  // and installing any other pack can move that target out from under it —
+  // the v3.4.0 "installed other packs and H3 vanished" report. Before this
+  // branch the panel just silently demoted the engine pill to "not
+  // installed", which reads as data loss and sent users to Reset (which does
+  // not touch H3 at all, so it never helped).
+  //
+  // Gated on `repairable`, so a user who never installed H3 is never nagged.
+  const h3s = s.h3 || {};
+  if (h3s.capable && !h3s.available && h3s.repairable) {
+    card.style.display = '';
+    card.classList.add('state-warn');
+    icon.innerHTML = '<svg class="ph" aria-hidden="true"><use href="#ph-warning-fill"/></svg>';
+    title.textContent = 'Hailuo H3 needs repair — your weights are still on disk';
+    sub.innerHTML = h3s.venv_broken
+      ? 'H3’s Python environment points at Pinokio’s shared interpreter and '
+        + 'another pack install moved it. Rebuilding takes ~2 minutes and '
+        + '<b>re-downloads nothing</b>.'
+      : 'H3’s code checkout is missing or incomplete. Restoring it takes ~1 '
+        + 'minute and <b>re-downloads nothing</b>.';
+    actions.innerHTML = `<button onclick="openH3InstallCard()">How to repair H3</button>`;
     return;
   }
 
@@ -35514,6 +36240,11 @@ if __name__ == "__main__":
     OUTPUT.mkdir(parents=True, exist_ok=True)
     UPLOADS.mkdir(parents=True, exist_ok=True)
     _sweep_orphan_tmps()
+    # Before the queue starts moving: kill anything a previous panel process
+    # left running (a SIGKILLed panel can't run its atexit hooks). Must happen
+    # BEFORE worker_loop starts, or the resumed job races an orphan that is
+    # still holding 40 GiB of the same GPU.
+    reap_orphan_subprocesses()
     load_hidden()
     load_queue()
     threading.Thread(target=worker_loop, daemon=True).start()
