@@ -1840,6 +1840,155 @@ def _train_install_dev_transformer(push_log) -> dict:
             "filename": "transformer-dev.safetensors"}
 
 
+def _h3_install_turbo(push_log) -> dict:
+    """Fetch the two files the H3 Turbo mode needs, ~804 MB total.
+
+    Same shape and the same single download slot as
+    _train_install_dev_transformer, but TWO steps in sequence, because the
+    files come from two different places:
+
+      1. the adapter, 744 MB, a plain `hf download --include` from the
+         Apache-2.0 LoRA repo;
+      2. `upstream_time_embedder.safetensors`, ~60 MB, which is not a
+         published file at all. It is four tensors read out of a 66 GB
+         MiniMaxAI shard by HTTP range request — safetensors puts every
+         tensor's byte offsets in a JSON header at the front of the file, so
+         the pack's own scripts/fetch_time_embedder.py asks for exactly those
+         ranges. No 66 GB download, and nothing here redistributes weights.
+
+    Step 2 needs the H3 pack's venv (it imports huggingface_hub + safetensors)
+    and a runner new enough to carry the script, both of which are checked
+    before anything starts, so a stale pack fails in one second with a sentence
+    rather than after a 744 MB download.
+
+    Returns {"ok": True, "started": True, ...} or {"ok": False, "error": ...}.
+    """
+    import subprocess
+    if DOWNLOAD["active"]:
+        return {"ok": False,
+                "error": f"another download is already active "
+                         f"({DOWNLOAD.get('repo_id', '?')})."}
+
+    paths = h3_paths()
+    if paths["missing"]:
+        return {"ok": False,
+                "error": "Turbo is an add-on to the Hailuo H3 pack, and H3 "
+                         "isn't fully installed yet: "
+                         + "; ".join(paths["missing"])}
+    fetcher = H3_ROOT / "scripts" / "fetch_time_embedder.py"
+    if not fetcher.is_file() or not h3_supports_lora():
+        return {"ok": False,
+                "error": "This Hailuo H3 checkout predates Turbo (no --lora "
+                         "support in its runner). Re-run 'Install Hailuo H3' "
+                         "from the Phosphene sidebar in Pinokio to update the "
+                         "clone — it keeps every weight already on disk."}
+
+    hf_bin = HF_BIN if HF_BIN is not None else _resolve_hf()
+    if hf_bin is None:
+        return {"ok": False, "error": "hf CLI not found on PATH."}
+
+    target = _h3_turbo_dir()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"ok": False, "error": f"can't create {target}: {exc}"}
+
+    env = dict(os.environ)
+    hf_token = _active_hf_token()
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+        env["HUGGING_FACE_HUB_TOKEN"] = hf_token
+    # Step 2 pulls one small index JSON through the hub cache. Left to itself
+    # that lands in ~/.cache/huggingface on a machine whose every other model
+    # lives under the Pinokio tree, so pin it inside the H3 models dir when the
+    # environment hasn't already said where the cache goes.
+    env.setdefault("HF_HOME", str(H3_MODELS / "hf_home"))
+    env["PYTHONUNBUFFERED"] = "1"
+
+    lora_cmd = [str(hf_bin), "download", H3_TURBO_REPO,
+                "--include", H3_TURBO_LORA_FILE,
+                "--local-dir", str(target)]
+    embed_cmd = [str(paths["python"]), str(fetcher),
+                 "--out", str(target / H3_TURBO_EMBEDDER_FILE)]
+
+    with DOWNLOAD_LOCK:
+        DOWNLOAD["active"] = True
+        DOWNLOAD["key"] = "h3_turbo"
+        DOWNLOAD["repo_id"] = H3_TURBO_REPO
+        DOWNLOAD["started_ts"] = time.time()
+        DOWNLOAD["last_line"] = ""
+
+    def _stream(cmd: list[str], tag: str) -> int:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, env=env, start_new_session=True)
+        with DOWNLOAD_LOCK:
+            DOWNLOAD["proc"] = proc
+            try:
+                DOWNLOAD["pgid"] = os.getpgid(proc.pid)
+            except ProcessLookupError:
+                DOWNLOAD["pgid"] = None
+        buf = ""
+        assert proc.stdout is not None
+        while True:
+            ch = proc.stdout.read(1)
+            if not ch:
+                break
+            # `hf` draws its progress bar with \r, so both are line breaks here.
+            if ch in ("\n", "\r"):
+                line, buf = buf.strip(), ""
+                if line:
+                    with DOWNLOAD_LOCK:
+                        DOWNLOAD["last_line"] = line[:200]
+                    push_log(f"[{tag}] {line[:300]}")
+            else:
+                buf += ch
+        return proc.wait()
+
+    def _runner():
+        try:
+            push_log(f"[h3:turbo] downloading the 4-step adapter "
+                     f"({H3_TURBO_REPO} / {H3_TURBO_LORA_FILE}, 744 MB) → "
+                     f"{target}")
+            rc = _stream(lora_cmd, "hf:turbo")
+            if rc != 0:
+                push_log(f"[h3:turbo] adapter download exited with code {rc} — "
+                         f"stopping before the time embedder.")
+                return
+            push_log("[h3:turbo] adapter done. Recovering the upstream time "
+                     "embedder (~60 MB read out of a 66 GB release by HTTP "
+                     "range — not a 66 GB download).")
+            rc = _stream(embed_cmd, "h3:embedder")
+            if rc != 0:
+                push_log(f"[h3:turbo] time-embedder fetch exited with code {rc}. "
+                         f"The adapter is on disk; Turbo stays off until this "
+                         f"step succeeds.")
+                return
+            status = h3_turbo_status()
+            if status["available"]:
+                push_log("[h3:turbo] Turbo is ready — the H3 surface offers it "
+                         "on the next page load.")
+            else:
+                push_log(f"[h3:turbo] finished, but the files still don't check "
+                         f"out: {'; '.join(status['missing']) or status['reason']}")
+        except Exception as exc:
+            push_log(f"[h3:turbo] install crashed: {exc}")
+        finally:
+            with DOWNLOAD_LOCK:
+                DOWNLOAD["active"] = False
+                DOWNLOAD["key"] = None
+                DOWNLOAD["repo_id"] = None
+                DOWNLOAD["started_ts"] = None
+                DOWNLOAD["last_line"] = ""
+                DOWNLOAD["proc"] = None
+                DOWNLOAD["pgid"] = None
+
+    threading.Thread(target=_runner, daemon=True, name="h3-turbo-download").start()
+    return {"ok": True, "started": True, "repo_id": H3_TURBO_REPO,
+            "files": [H3_TURBO_LORA_FILE, H3_TURBO_EMBEDDER_FILE],
+            "dir": str(target), "size_gb": H3_TURBO_DOWNLOAD_GB}
+
+
 # Compatibility taxonomy for LoRAs across the panel's two render lanes
 # (video via ltx_pipelines_mlx + image via mflux). The picker filters its
 # library down to LoRAs that can fire with the user's current
@@ -4724,6 +4873,49 @@ H3_TEXT_CONFIG_REL = ("FL2VA", "text_encoder", "config.json")
 # H3 runs at 24 fps like LTX, on a 17n+5 frame grid (the runner snaps up).
 H3_FPS = 24.0
 
+# ---- Turbo: the 4-step distillation LoRA -------------------------------------
+# larryvrh/MiniMax-H3-Turbo-Lora (Apache-2.0) distils H3's sampler down to 4
+# sigma points = 3 forwards, against the 9 points / 8 forwards every tier bakes.
+# It is a SPEED MODE, not a tier and not a quality preset: same model, same
+# geometry, same prompt — fewer denoise passes.
+#
+# Two files, ~804 MB together, neither of them redistributed by Phosphene:
+#   the adapter          744 MB   from the LoRA repo (Apache-2.0)
+#   upstream_time_embedder.safetensors ~60 MB, recovered by the H3 pack's own
+#     scripts/fetch_time_embedder.py — an HTTP-RANGE read of four tensors out of
+#     a 66 GB MiniMaxAI release, not a 66 GB download. Needed because the pruned
+#     checkpoint dropped the 2688-d timestep MLP that the adapter's 51 adaLN
+#     modules consume; without it those 51 are skipped (the render still works,
+#     it is just missing a ~1e-4 correction to the modulation).
+H3_TURBO_REPO = "larryvrh/MiniMax-H3-Turbo-Lora"
+# The EMA checkpoint-500 file specifically. The non-EMA sibling is sharper but
+# over-etches speculars and runs the audio to -0.3 dB with no headroom; the
+# preview (pre-ckpt500) file is visibly softer. Third-party ComfyUI conversions
+# are bit-exact subsets that DROP the 51 adaLN pairs this runner can apply, so
+# they are strictly less than the original here.
+H3_TURBO_LORA_FILE = "minimax_h3_turbo_4step_ema_ckpt500.safetensors"
+H3_TURBO_EMBEDDER_FILE = "upstream_time_embedder.safetensors"
+H3_TURBO_DIRNAME = "turbo-lora"
+# Sigma POINTS, matching --steps. 4 points = 3 forwards = what the adapter was
+# distilled for; it is visibly softer at fewer and gains nothing at more.
+H3_TURBO_STEPS = 4
+H3_TURBO_DOWNLOAD_GB = 0.8
+# Size floors for the "is it really there" probe. An interrupted fetch leaves a
+# short file that loads far enough to fail 30 s into a render, which is exactly
+# the failure mode the H3-vanish lesson says to catch at status time instead.
+H3_TURBO_LORA_MIN_BYTES = 600 * 1024 * 1024
+H3_TURBO_EMBEDDER_MIN_BYTES = 40 * 1024 * 1024
+# 8 forwards -> 3. Denoise dominates at every tier and the rest of the pipeline
+# (staged loads, VAE decode) is untouched, so a whole clip lands near 0.6x.
+# MEASURED at 1152x640 / 124f: 19:26 -> 11:29, i.e. 0.59x, per-forward cost
+# unchanged. The per-tier `turbo_eta` below is that ratio applied to each tier's
+# own measured eta — an ESTIMATE, and labelled as one in the UI, because no tier
+# on this table has been rendered with the adapter end to end yet.
+H3_TURBO_SPEEDUP = 0.6
+# One line, no marketing. It is a step-distillation adapter; say so.
+H3_TURBO_NOTE = ("Turbo is a 4-step distillation LoRA — fewer denoise passes, "
+                 "same model. Slightly harder contrast than the 9-step default.")
+
 # Quality tiers for H3. These are DATA, not magic numbers — every value below
 # was measured on a 64 GB M4 Max (see the metrics JSONs in the H3 campaign):
 #
@@ -4755,8 +4947,20 @@ H3_FPS = 24.0
 #   window_frames  = frames per window handed to --frames
 #   chain_windows  = N (>1 means chained; the runner needs --chain-windows)
 #   note           = the honest artefact warning, rendered under the tier strip
+#   draft          = this is a look-see tier, not a delivery tier. Two things
+#                    read it: the panel shows the tier's `note` while it is
+#                    selected, and a FINISHED render at a draft tier gets the
+#                    "Finish at …" affordance on the output card (re-queue the
+#                    identical job — same seed — at a delivery tier).
 H3_TIER_CHAIN_NOTE = ("Scripted dialogue repeats once per 5 s window — put "
                       "dialogue cues late in the prompt.")
+# The draft tier renders at 0.25 MP (640×384). The H3 community's practical
+# floor is ~0.5 MP, and video STRUCTURE resolves in the last denoise step, so
+# at 9 steps a 0.25 MP pass is genuinely noisy: composition, motion and
+# dialogue timing are trustworthy, per-pixel face detail is not. Say that where
+# the user picks the tier instead of letting them conclude H3 is bad.
+H3_TIER_DRAFT_NOTE = ("Draft is for composition, motion and dialogue timing — "
+                      "faces and fine detail only resolve at the higher tiers.")
 
 
 def _build_h3_tiers() -> dict[str, dict]:
@@ -4764,26 +4968,30 @@ def _build_h3_tiers() -> dict[str, dict]:
         "draft_3s": {
             "key": "draft_3s", "label": "Draft · 3s",
             "width": 640, "height": 384, "frames": 73, "steps": 9,
-            "spec": "640×384 · 73f", "eta": "~3 min",
+            "spec": "640×384 · 73f", "eta": "~3 min", "eta_min": 3.0,
             "blurb": "Fastest look-see. Good enough to judge motion + dialogue timing.",
+            # The one tier that is explicitly NOT a delivery tier — see the
+            # `draft` key in the block comment above.
+            "draft": True,
+            "note": H3_TIER_DRAFT_NOTE,
         },
         "hq_3s": {
             "key": "hq_3s", "label": "HQ · 3s",
             "width": 768, "height": 448, "frames": 73, "steps": 9,
-            "spec": "768×448 · 73f", "eta": "~4-5 min",
+            "spec": "768×448 · 73f", "eta": "~4-5 min", "eta_min": 4.5,
             "blurb": "Same length as Draft at the delivery resolution.",
         },
         "hq_5s": {
             "key": "hq_5s", "label": "HQ · 5s",
             "width": 768, "height": 448, "frames": 124, "steps": 9,
-            "spec": "768×448 · 124f", "eta": "~8 min",
+            "spec": "768×448 · 124f", "eta": "~8 min", "eta_min": 8.0,
             "blurb": "The workhorse: a full 5 s beat with synced dialogue.",
         },
         "long_10s": {
             "key": "long_10s", "label": "Long · 10s",
             "width": 768, "height": 448, "frames": 243,
             "window_frames": 124, "chain_windows": 2, "steps": 9,
-            "spec": "768×448 · 243f · 2×5s", "eta": "~17 min",
+            "spec": "768×448 · 243f · 2×5s", "eta": "~17 min", "eta_min": 17.0,
             "blurb": "Two chained 5 s windows — half the dense pass's 36 min, "
                      "and no duplicated-subject ghosting.",
             "note": H3_TIER_CHAIN_NOTE,
@@ -4792,7 +5000,7 @@ def _build_h3_tiers() -> dict[str, dict]:
             "key": "long_15s", "label": "Long · 15s",
             "width": 768, "height": 448, "frames": 362,
             "window_frames": 124, "chain_windows": 3, "steps": 9,
-            "spec": "768×448 · 362f · 3×5s", "eta": "~27 min · batch",
+            "spec": "768×448 · 362f · 3×5s", "eta": "~27 min · batch", "eta_min": 27.0,
             "blurb": "Three chained windows. Identity held across both joins in "
                      "validation. Queue it and walk away.",
             "note": H3_TIER_CHAIN_NOTE,
@@ -4805,14 +5013,26 @@ def _build_h3_tiers() -> dict[str, dict]:
             "key": "long_10s_dense", "label": "Long · 10s (dense)",
             "width": 768, "height": 448, "frames": 243, "steps": 16,
             "spec": "768×448 · 243f · single pass", "eta": "~36 min · batch",
+            "eta_min": 36.0,
             "blurb": "One dense pass at 15 forwards — the pre-chaining path. "
                      "Kept for A/B only; the chained tier is 2.1× faster.",
         }
+    # What each tier would cost with Turbo on. Derived, not measured — see
+    # H3_TURBO_SPEEDUP for where 0.6 comes from and why it is honest to apply it
+    # here but not to call it a measurement.
+    for _t in tiers.values():
+        _mins = max(1, round(float(_t.get("eta_min") or 0) * H3_TURBO_SPEEDUP))
+        _t["turbo_eta"] = f"~{_mins} min"
     return tiers
 
 
 H3_TIERS: dict[str, dict] = _build_h3_tiers()
 H3_TIER_DEFAULT = "draft_3s"
+# Where "Finish at …" sends a draft by default. hq_5s is the workhorse: same
+# 768×448 delivery geometry as hq_3s but a full 5 s beat, which is the length
+# the dialogue timing a draft was judged on actually needs. The panel offers
+# every non-draft tier in the picker; this is only the pre-selected one.
+H3_TIER_FINISH_DEFAULT = "hq_5s"
 # Post-render export targets for an H3 clip. H3 writes 768×448 (12:7) natively,
 # which is neither 720p nor 1080p, so the panel applies the SAME ffmpeg recipe
 # LTX renders get: lanczos fit inside the canvas, pad the remainder, re-encode
@@ -5023,6 +5243,97 @@ def h3_supports_first_frame() -> bool:
     return _h3_runner_has_flag("--first-frame")
 
 
+def h3_supports_lora() -> bool:
+    """Whether the INSTALLED runner accepts `--lora` / `--lora-adaln`.
+
+    LoRA support landed on codex/h3-engine after Turbo's weights became
+    downloadable, so a pack cloned before that renders every tier fine and has
+    no way to take the adapter. Same probe, same reason, as --first-frame and
+    --chain-windows: hide what the pack can't do rather than dying on an
+    argparse error 30 s into a render."""
+    return _h3_runner_has_flag("--lora-adaln")
+
+
+def _h3_turbo_dir() -> Path:
+    """Where Turbo's two files live: alongside the other weight components.
+
+    Follows whichever of the two supported model layouts actually holds the
+    DiT, so Turbo lands next to `deepbeep-pruned-bf16` / `ddalcu-q8` rather
+    than in a third place."""
+    for root in _h3_model_roots():
+        if (root / "deepbeep-pruned-bf16" / H3_DIT_FILENAME).is_file():
+            return root / H3_TURBO_DIRNAME
+    return H3_MODELS / H3_TURBO_DIRNAME
+
+
+def _h3_real_file(path: Path, min_bytes: int) -> bool:
+    """A file that is REALLY there — resolved, regular, and big enough.
+
+    `is_file()` already follows symlinks, so a dangling chain (the trap that
+    made H3 "vanish" when another Pinokio pack re-resolved the shared uv
+    Python) reads False here, which is the correct answer for a weight file we
+    are about to hand to a subprocess. The size floor is the second half: an
+    interrupted download leaves a short file that passes every existence check
+    and then fails deep inside the runner."""
+    try:
+        return path.is_file() and path.stat().st_size >= min_bytes
+    except OSError:
+        return False
+
+
+def h3_turbo_paths() -> dict:
+    """Resolve Turbo's two files. Never raises; reports what is missing."""
+    directory = _h3_turbo_dir()
+    lora = directory / H3_TURBO_LORA_FILE
+    embedder = directory / H3_TURBO_EMBEDDER_FILE
+    lora_ok = _h3_real_file(lora, H3_TURBO_LORA_MIN_BYTES)
+    embedder_ok = _h3_real_file(embedder, H3_TURBO_EMBEDDER_MIN_BYTES)
+    missing: list[str] = []
+    if not lora_ok:
+        missing.append(f"adapter ({H3_TURBO_LORA_FILE})")
+    if not embedder_ok:
+        missing.append(f"time embedder ({H3_TURBO_EMBEDDER_FILE})")
+    return {
+        "dir": directory,
+        "lora": lora if lora_ok else None,
+        "embedder": embedder if embedder_ok else None,
+        "missing": missing,
+        "files_ok": not missing,
+    }
+
+
+def h3_turbo_status() -> dict:
+    """Turbo's own availability block for /status + the page bootstrap.
+
+    Three separable answers, because the UI needs three different sentences:
+      supported   — the installed runner has --lora at all (else: update pack)
+      downloaded  — both weight files are really on disk
+      available   — both, so the control can actually be offered
+    """
+    supported = h3_supports_lora()
+    paths = h3_turbo_paths()
+    downloaded = paths["files_ok"]
+    if not supported:
+        reason = "runner_too_old"
+    elif not downloaded:
+        reason = "not_downloaded"
+    else:
+        reason = "ok"
+    return {
+        "available": bool(supported and downloaded),
+        "supported": supported,
+        "downloaded": downloaded,
+        "reason": reason,
+        "steps": H3_TURBO_STEPS,
+        "download_gb": H3_TURBO_DOWNLOAD_GB,
+        "repo": H3_TURBO_REPO,
+        "dir": str(paths["dir"]),
+        "missing": paths["missing"],
+        "note": H3_TURBO_NOTE,
+        "label": "Turbo",
+    }
+
+
 def h3_supports_chain() -> bool:
     """Whether the INSTALLED runner accepts `--chain-windows` (window chaining).
 
@@ -5051,6 +5362,16 @@ def h3_status() -> dict:
         "installed": available,
         "first_frame": available and h3_supports_first_frame(),
         "chain": available and h3_supports_chain(),
+        # Turbo — the 4-step distill LoRA. A separate block rather than a bare
+        # flag because "off" has three causes the UI must not conflate: H3
+        # itself isn't there, the runner predates --lora, or the 0.8 GB simply
+        # hasn't been downloaded yet (the only one that is a button).
+        "turbo": (h3_turbo_status() if available else
+                  {"available": False, "supported": False, "downloaded": False,
+                   "reason": "h3_" + paths["reason"], "steps": H3_TURBO_STEPS,
+                   "download_gb": H3_TURBO_DOWNLOAD_GB, "repo": H3_TURBO_REPO,
+                   "dir": str(_h3_turbo_dir()), "missing": [],
+                   "note": H3_TURBO_NOTE, "label": "Turbo"}),
         "min_ram_gb": H3_MIN_RAM_GB,
         "ram_gb": round(SYSTEM_RAM_GB, 1),
         "root": paths["root"],
@@ -5068,6 +5389,11 @@ def h3_status() -> dict:
         "weights_ok": paths["weights_ok"],
         "tiers": h3_visible_tiers(),
         "default_tier": H3_TIER_DEFAULT,
+        # Pre-selected target for the "Finish at …" affordance on a draft
+        # render. The panel derives the OFFERED list from `tiers` (everything
+        # without `draft: true`), so this table stays the single source of
+        # truth for both — a tier change is still one Python edit.
+        "finish_default": H3_TIER_FINISH_DEFAULT,
         "upscale_modes": list(H3_UPSCALE_MODES),
         "default_upscale": H3_UPSCALE_DEFAULT,
         "modes": list(H3_MODES),
@@ -6651,6 +6977,13 @@ def list_outputs(
         # read is cheap, but tolerate a missing/corrupt sidecar by leaving
         # elapsed_sec null and letting the UI fall back to the file mtime.
         elapsed_sec = None
+        # Which engine rendered this, and (H3 only) at which tier. Both come
+        # out of the sidecar read we are ALREADY doing for elapsed_sec, so
+        # they cost nothing — and they let the stage pane decide synchronously
+        # whether a clip is a finishable H3 draft. Without them the "Finish
+        # at …" button would need a /sidecar fetch on every gallery click.
+        engine = None
+        h3_tier = None
         sidecar = p.with_suffix(p.suffix + ".json")
         has_sidecar = sidecar.exists()
         if has_sidecar:
@@ -6659,6 +6992,17 @@ def list_outputs(
                 v = meta.get("elapsed_sec")
                 if isinstance(v, (int, float)):
                     elapsed_sec = float(v)
+                _sc_params = meta.get("params")
+                if not isinstance(_sc_params, dict):
+                    _sc_params = {}
+                # Top-level `engine` is what the H3 path stamps; the image
+                # path only has params.engine ("mflux/ideogram" etc.).
+                _eng = meta.get("engine") or _sc_params.get("engine")
+                if isinstance(_eng, str) and _eng:
+                    engine = _eng
+                _tier = _sc_params.get("h3_tier")
+                if isinstance(_tier, str) and _tier:
+                    h3_tier = _tier
             except Exception:
                 pass
         # Y1.039 cache-bust — append the file's mtime as a version param so
@@ -6683,6 +7027,11 @@ def list_outputs(
             "elapsed_sec": elapsed_sec,
             "url": url,
             "has_sidecar": has_sidecar,
+            # Sidecar-derived, cheap (see the read above). `engine` is "h3" on
+            # an H3 clip and the mflux token on a still; `h3_tier` is set only
+            # by the H3 path and is what the Finish affordance gates on.
+            "engine": engine,
+            "h3_tier": h3_tier,
             "hidden": is_hidden,
             # 'kind' lets the right-pane viewer + filter chips branch
             # without re-parsing the filename. Mirrors isPhotoOutput() on
@@ -8230,6 +8579,12 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             _h3_steps = max(4, min(30, int(_h3_steps_raw)))
         except (TypeError, ValueError):
             _h3_steps = 0
+    # Turbo — the 4-step distill LoRA. A speed MODE, not a tier: it swaps the
+    # sampler recipe and leaves geometry alone. Gated server-side on the same
+    # principle as every other H3 gate here (a stale tab, a Load-Params replay
+    # or a curl must never reach the worker asking for an adapter this install
+    # doesn't have).
+    _h3_turbo = (f("h3_turbo", "") or "").strip().lower() in ("1", "true", "on", "yes")
     if _engine == "h3":
         if mode_in not in H3_MODES:
             push(f"engine=h3 requested for mode={mode_in!r} — Hailuo H3 only "
@@ -8252,6 +8607,27 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
                  f"checkout doesn't have (no --chain-windows). Update the H3 "
                  f"pack; rendering {_fallback!r} instead.")
             _h3_tier = _fallback
+        if _h3_turbo and h3_available():
+            _turbo = h3_turbo_status()
+            if not _turbo["available"]:
+                push("Turbo requested but " + (
+                    "this H3 checkout's runner has no --lora support — update "
+                    "the pack." if not _turbo["supported"] else
+                    "its files aren't downloaded ("
+                    + "; ".join(_turbo["missing"]) + ")."
+                ) + f" Rendering at the tier's own {H3_TIERS[_h3_tier]['steps']} steps.")
+                _h3_turbo = False
+    else:
+        # Turbo is an H3 sampler mode and means nothing on the LTX lane; a
+        # fallback to LTX above must not leave the flag set on the job.
+        _h3_turbo = False
+    if _h3_turbo and _h3_steps:
+        # The adapter is distilled FOR 4 sigma points. Honouring a Steps pill on
+        # top of it would quietly render a configuration nobody validated, so
+        # Turbo wins and says so rather than losing to a leftover pill.
+        push(f"Turbo pins the sampler at {H3_TURBO_STEPS} steps — ignoring the "
+             f"{_h3_steps}-step override.")
+        _h3_steps = 0
 
     job = {
         "id": _new_job_id(),
@@ -8279,6 +8655,11 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
             # the resolved `steps` below so the ⓘ modal can say the default
             # was overridden. Same allowlist trap as above.
             "h3_steps": _h3_steps,
+            # Turbo: render this job with the 4-step distillation LoRA instead
+            # of the tier's 9 sigma points. SAME allowlist trap as every key in
+            # this dict — leaving `h3_turbo` out of here is how the control
+            # would look wired, pass validation, and silently render at 9.
+            "h3_turbo": _h3_turbo,
             "prompt": prompt,
             "negative_prompt": f("negative_prompt", ""),
             "width": max(32, int(f("width", str(default_w)) or default_w)),
@@ -8414,10 +8795,12 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
         # the per-window count, so the queue card and the duration line read the
         # clip the user actually gets. run_h3_job_inner splits it back out.
         job["params"]["frames"] = _tier_cfg["frames"]
-        # Tier steps unless the user pinned a depth on the Steps pills —
-        # run_h3_job_inner reads this resolved value, so the override rides
-        # the SAME path the tier default does (nothing downstream branches).
-        job["params"]["steps"] = int(_h3_steps or _tier_cfg["steps"])
+        # Tier steps unless the user pinned a depth on the Steps pills, or
+        # Turbo pinned its own — run_h3_job_inner reads this resolved value, so
+        # both ride the SAME path the tier default does (nothing downstream
+        # branches on WHY the count is what it is).
+        job["params"]["steps"] = int(
+            H3_TURBO_STEPS if _h3_turbo else (_h3_steps or _tier_cfg["steps"]))
         job["params"]["h3_chain_windows"] = int(_tier_cfg.get("chain_windows") or 1)
         job["params"]["h3_window_frames"] = int(
             _tier_cfg.get("window_frames") or _tier_cfg["frames"])
@@ -9652,6 +10035,28 @@ def run_h3_job_inner(job: dict) -> None:
         raise RuntimeError("H3 needs a prompt — dialogue and sound are "
                            "generated jointly from it.")
 
+    # ---- Turbo: the 4-step distillation LoRA -----------------------------
+    # make_job already gated this and pinned `steps`, but re-resolve the files
+    # HERE: the queue can sit for an hour and a job must not reach the runner
+    # with a --lora path that stopped resolving in the meantime.
+    turbo = bool(p.get("h3_turbo"))
+    turbo_paths: dict = {}
+    if turbo:
+        if not h3_supports_lora():
+            raise RuntimeError(
+                "Turbo needs `--lora` support, which this Hailuo H3 checkout "
+                f"doesn't have ({paths['runner']}). Re-run 'Install Hailuo H3' "
+                "from the Phosphene sidebar to update the clone — it keeps "
+                "every weight already on disk.")
+        turbo_paths = h3_turbo_paths()
+        if not turbo_paths["files_ok"]:
+            raise RuntimeError(
+                "Turbo's files aren't on disk: "
+                + "; ".join(turbo_paths["missing"])
+                + f". Expected under {turbo_paths['dir']} — turn Turbo off, or "
+                  "click its download button (~0.8 GB).")
+        steps = H3_TURBO_STEPS
+
     # First-frame conditioning (Image mode). The flag landed on the runner
     # after the first public branch, so probe the INSTALLED script rather than
     # assuming; an older pack renders Text fine and must fail here with a
@@ -9727,6 +10132,12 @@ def run_h3_job_inner(job: dict) -> None:
                 "--chain-total-frames", str(frames)]
     if first_frame is not None:
         cmd += ["--first-frame", str(first_frame)]
+    if turbo:
+        # `--lora-adaln` carries the recovered time embedder, which lets the
+        # runner apply the adapter's 51 adaLN modules too. They fold into the
+        # precomputed modulation cache, so they cost nothing per forward.
+        cmd += ["--lora", str(turbo_paths["lora"]),
+                "--lora-adaln", str(turbo_paths["embedder"])]
 
     env = os.environ.copy()
     # The runner pipes raw RGB into `ffmpeg` from PATH (minimax_h3_mlx.media);
@@ -9736,9 +10147,12 @@ def run_h3_job_inner(job: dict) -> None:
 
     push(f"[h3] {tier['label']} · {width}×{height} · {frames}f · "
          f"{steps} sigma points ({steps - 1} forwards) · seed {seed}"
+         + (" · Turbo (4-step distill LoRA)" if turbo else "")
          + (f" · {chain_windows} chained windows of {window_frames}f"
             if chain_windows > 1 else "")
          + (f" · first frame {first_frame.name}" if first_frame else ""))
+    if turbo:
+        push(f"[h3] {H3_TURBO_NOTE}")
     if chain_windows > 1 and tier.get("note"):
         push(f"[h3] note: {tier['note']}")
     push("[h3] $ " + " ".join(shlex.quote(c) for c in cmd))
@@ -9964,6 +10378,10 @@ def run_h3_job_inner(job: dict) -> None:
             "h3_tier": tier["key"],
             "h3_tier_label": tier["label"],
             "h3_upscale": h3_upscale_mode,
+            # Written unconditionally so a False is a fact ("rendered without
+            # Turbo") rather than an absence the reader has to guess about —
+            # this is what Load Params, Draft → Finish and the ⓘ modal read.
+            "h3_turbo": turbo,
             "width": width, "height": height, "frames": frames, "steps": steps,
             "seed_used": seed,
             "image": str(first_frame) if first_frame else None,
@@ -9988,6 +10406,17 @@ def run_h3_job_inner(job: dict) -> None:
             "phase_seconds": {k: v.get("seconds") for k, v in phases.items()},
             "peak_gib": max([v.get("peak_gib") or 0 for v in phases.values()] or [0]),
             "first_frame": str(first_frame) if first_frame else None,
+            "turbo": ({"lora": str(turbo_paths["lora"]),
+                       "adaln": str(turbo_paths["embedder"]),
+                       "steps": steps,
+                       "repo": H3_TURBO_REPO,
+                       # The runner's own report: how many of the 259 modules
+                       # actually landed, and how big the adaLN correction was.
+                       "applied": (metrics.get("lora")
+                                   or metrics.get("w1_lora")),
+                       "adaln_applied": (metrics.get("lora_adaln")
+                                         or metrics.get("w1_lora_adaln"))}
+                      if turbo else None),
             "chain_windows": chain_windows,
             "window_frames": window_frames,
             "delivered_frames": metrics.get("delivered_frames", frames),
@@ -15355,6 +15784,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(result, 202)
             return
 
+        # ====== Hailuo H3 Turbo — fetch the 4-step adapter on demand.
+        # ~804 MB in two steps (see _h3_install_turbo). 202 + poll /status's
+        # `download` block, same contract as /train/install; the Turbo control
+        # stays hidden until h3.turbo.available flips.
+        if path == "/h3/turbo/install":
+            result = _h3_install_turbo(push)
+            if not result.get("ok"):
+                self._json(result, 409 if "active" in result.get("error", "") else 400)
+                return
+            self._json(result, 202)
+            return
+
         # ====== Re-submit a failed/cancelled job by id ====================
         # The Recent tab's Retry button hits this. We look up the source
         # job in history (and current/queue defensively), clone its params,
@@ -19571,6 +20012,18 @@ HTML = r"""<!doctype html>
       font-size: 11px; color: var(--muted); text-transform: uppercase;
       letter-spacing: .4px; font-weight: 600; flex: 0 0 auto;
     }
+    /* Turbo offered but its 0.8 GB isn't downloaded. Same visual grammar as
+       .engine-chip.needs-install — dashed + dimmed reads "real control, not
+       ready yet" — but WITHOUT .pill-btn.disabled, because this one is
+       clickable: the click is what starts the download. */
+    .pill-btn.needs-download { opacity: .62; border-style: dashed; }
+    .pill-btn.needs-download:hover { opacity: .9; }
+    /* The honest one-liner under the Speed row. Shown only while Turbo is on,
+       so it describes the render being queued rather than advertising. */
+    .h3-turbo-note {
+      font-size: 11px; line-height: 1.45; color: var(--muted);
+      margin: -4px 0 8px 2px; max-width: 62ch;
+    }
 
     /* Customize disclosure inside the form — sub-tier UI, lighter than
        a top-level <details>. Subtle border, indented body, distinct
@@ -20465,6 +20918,60 @@ HTML = r"""<!doctype html>
       color: #ff8b80;
       border-color: rgba(248,81,73,0.35);
     }
+
+    /* ---- "Finish at …" split control (H3 draft outputs only) -------------
+       Shown by _syncH3FinishAffordance() when the selected clip was rendered
+       at a tier flagged `draft` in H3_TIERS. Two parts sharing one shell:
+       the button commits the draft at the chosen tier, the caret-only
+       <select> beside it changes which tier that is.
+
+       A native <select> rather than a bespoke popover on purpose: the action
+       cluster lives inside .player-surface, which is overflow:hidden in the
+       landscape case, so a custom menu would need portaling out of it to be
+       safe. The native control renders in the browser's own layer, is
+       keyboard-accessible for free, and there is no menu component in this
+       panel to be consistent with anyway. */
+    .po-finish {
+      display: inline-flex; align-items: stretch;
+      border: 1px solid rgba(88,166,255,0.30);
+      border-radius: var(--r-sm);
+      background: rgba(47,129,247,0.14);
+    }
+    .po-finish .po-act.po-act-finish {
+      border: none;
+      color: var(--accent-bright, #58a6ff);
+      border-radius: var(--r-sm) 0 0 var(--r-sm);
+    }
+    .po-finish .po-act.po-act-finish:hover {
+      background: rgba(47,129,247,0.26);
+      color: #fff;
+    }
+    .po-finish-select {
+      appearance: none; -webkit-appearance: none;
+      width: 20px; padding: 0;
+      border: none;
+      border-left: 1px solid rgba(88,166,255,0.25);
+      border-radius: 0 var(--r-sm) var(--r-sm) 0;
+      background: transparent;
+      /* Caret drawn as a data-URI chevron: the select is 20 px wide and shows
+         no value text, so the native arrow (which reserves label width) would
+         clip. Colour matches .po-act-finish. */
+      background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 4 L5 7 L8 4' fill='none' stroke='%2358a6ff' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: center;
+      color: transparent;
+      font-size: 11.5px;
+      cursor: pointer;
+      transition: var(--t-fast);
+    }
+    .po-finish-select:hover { background-color: rgba(47,129,247,0.26); }
+    /* The options themselves DO need readable colours — `color: transparent`
+       above only hides the closed control's own (empty) label. */
+    .po-finish-select option { color: var(--text, #e6edf3); background: var(--bg, #0d1017); }
+    /* The cost is the whole point of this button ("~8 min" is the decision),
+       so it keeps its label in the compact breakpoint below where every other
+       .po-act drops to icon-only. */
+    .po-finish .po-act-label { display: inline !important; }
     /* Vertical-media variant (2026-05-18): for portrait clips the player
        surface shrinks to ~9:16 ratio and the action cluster's default
        top-right anchor lands on top of the subject's head. Mr Bizarro's call:
@@ -24131,6 +24638,26 @@ HTML = r"""<!doctype html>
             </div>
           </div>
           <input type="hidden" name="h3_steps" id="h3_steps" value="auto">
+          <!-- H3 Turbo — the 4-step distillation LoRA. Sits with Steps because
+               it is the same axis (how many denoise passes), and it WINS: with
+               Turbo on the Steps pills are disabled and the sampler is pinned
+               at 4. Rendered by renderH3Turbo() from BOOT.h3.turbo, so Python
+               stays the single source of truth for availability, size and copy.
+               The row hides entirely when the installed runner has no --lora.
+               `h3_turbo` is in the make_job allowlist (an unlisted field
+               silently no-ops on /queue/add — the known trap). -->
+          <div class="h3-export-row" id="h3TurboRow" data-h3-only hidden>
+            <span class="h3-export-label">Speed</span>
+            <div class="pill-group" id="h3TurboGroup" style="display:flex;gap:4px;flex:0 0 auto;">
+              <button type="button" class="pill-btn active" data-h3-turbo="0"
+                      style="padding:4px 10px;font-size:12px;"
+                      title="The tier's own sampler — 9 sigma points, 8 forwards.">Standard</button>
+              <button type="button" class="pill-btn" data-h3-turbo="1" id="h3TurboPill"
+                      style="padding:4px 10px;font-size:12px;">Turbo</button>
+            </div>
+          </div>
+          <input type="hidden" name="h3_turbo" id="h3_turbo" value="0">
+          <div class="h3-turbo-note" id="h3TurboNote" data-h3-only hidden></div>
           <!-- 2026-05-17 (Codex C+ pass 6): the character-only skip-step
                toggle moved out of here into the Customize section as
                "HQ speed". It's a Q8 sampler control, not a character
@@ -25637,6 +26164,29 @@ HTML = r"""<!doctype html>
            working (loadParamsBtn.disabled, animateBtn.style.display,
            useAsExtendBtn.style.display all still apply). -->
       <div class="player-overlay-actions" id="playerOverlayActions" style="display:none">
+        <!-- Draft → Finish (Hailuo H3). Hidden for every clip that wasn't
+             rendered at a tier flagged `draft` in H3_TIERS, which is the
+             only state where "re-run this at a delivery tier" is a coherent
+             offer. Leads the cluster because on a draft it IS the action.
+             Wired exactly like Params/Extend: read the clip's sidecar,
+             restore it into #genForm, submit through the one submit path —
+             the difference is that the tier is swapped on the way in and the
+             seed is pinned to the draft's ACTUAL seed_used, so the finish
+             render is the same clip rather than a new roll of the dice.
+             The label carries the target tier's own `eta` from H3_TIERS. -->
+        <div class="po-finish" id="h3FinishWrap" style="display:none">
+          <button id="h3FinishBtn" class="po-act po-act-finish" type="button"
+                  onclick="h3FinishActive()">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M8 2 L9.6 6.4 L14 8 L9.6 9.6 L8 14 L6.4 9.6 L2 8 L6.4 6.4 Z"
+                    stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/>
+            </svg>
+            <span class="po-act-label" id="h3FinishLabel">Finish</span>
+          </button>
+          <select id="h3FinishTier" class="po-finish-select"
+                  title="Pick the tier to finish at"
+                  onchange="h3FinishSetTier(this.value)"></select>
+        </div>
         <button id="loadParamsBtn" class="po-act" type="button"
                 onclick="loadParams()" title="Load this clip's render params back into the form" disabled>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -31193,7 +31743,11 @@ function updateCustomizeSummary() {
     const up = (document.getElementById('h3_upscale') || {}).value || 'off';
     const parts = [tier ? tier.spec : 'Hailuo H3'];
     const stOv = (document.getElementById('h3_steps') || {}).value || 'auto';
-    if (stOv !== 'auto') parts.push(stOv + ' steps');
+    // Turbo pins the sampler, so it replaces the steps line rather than
+    // sitting next to a number it just overruled.
+    if ((document.getElementById('h3_turbo') || {}).value === '1') {
+      parts.push('Turbo · ' + (((H3 || {}).turbo || {}).steps || 4) + ' steps');
+    } else if (stOv !== 'auto') parts.push(stOv + ' steps');
     if (up === 'fit_720p') parts.push('720p export');
     else if (up === 'fit_1080p') parts.push('1080p export');
     else parts.push('native export');
@@ -31341,6 +31895,14 @@ function h3TierByKey(key) {
   let savedSt = null;
   try { savedSt = localStorage.getItem('phos_h3_steps'); } catch (e) {}
   if (savedSt && ['auto', '12', '16', '20'].indexOf(savedSt) !== -1) st.value = savedSt;
+  // And Turbo — but only restore an ON state when this install can actually
+  // serve it. A user who downloaded the adapter, deleted it and reloaded must
+  // come back on Standard, not on a mode that would fail at queue time.
+  const tb = document.getElementById('h3_turbo');
+  if (!tb) return;
+  let savedTb = null;
+  try { savedTb = localStorage.getItem('phos_h3_turbo'); } catch (e) {}
+  tb.value = (savedTb === '1' && H3.turbo && H3.turbo.available) ? '1' : '0';
 })();
 
 // Export canvas for an H3 render. Separate from the LTX `upscale` control
@@ -31381,6 +31943,126 @@ function setH3Steps(v) {
 }
 document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
   b.onclick = () => setH3Steps(b.dataset.h3Steps);
+});
+
+// ---- Turbo: the 4-step distillation LoRA ------------------------------------
+// A speed MODE, not a tier: same model, same geometry, fewer denoise passes.
+// Three states, and the UI has to say which one it is in:
+//   runner has no --lora  → the whole row is hidden (an old pack never learns
+//                           Turbo exists, exactly like chained tiers)
+//   supported, not downloaded → dashed pill; clicking starts the 0.8 GB fetch
+//   available             → a normal pill, and picking it pins steps at 4
+function h3TurboState() {
+  return (H3 && H3.turbo) || { available: false, supported: false, downloaded: false };
+}
+
+// The per-tier estimate comes from the server's tier table (turbo_eta), which
+// is H3_TURBO_SPEEDUP applied to that tier's own eta. Derived, not measured —
+// the tooltip says so rather than presenting it as a timing.
+function h3TurboPillLabel() {
+  const t = h3TurboState();
+  if (!t.downloaded) return 'Turbo · ' + (t.download_gb || 0.8) + ' GB download';
+  const tier = h3TierByKey((document.getElementById('h3_tier') || {}).value);
+  const eta = tier && tier.turbo_eta ? tier.turbo_eta : '';
+  return eta ? ('Turbo · ' + eta) : 'Turbo';
+}
+
+function renderH3Turbo() {
+  const row = document.getElementById('h3TurboRow');
+  const pill = document.getElementById('h3TurboPill');
+  const t = h3TurboState();
+  if (row) row.hidden = !t.supported;
+  if (!pill) return;
+  pill.textContent = h3TurboPillLabel();
+  pill.classList.toggle('needs-download', !t.downloaded);
+  pill.title = t.downloaded
+    ? (t.note || '') + ' Estimated from this tier’s own time, not measured at this canvas.'
+    : 'Downloads the 4-step adapter + the recovered time embedder (~'
+      + (t.download_gb || 0.8) + ' GB) into the H3 pack. Nothing is bundled with Phosphene.';
+  // The pack could have gone away (or arrived) since boot without a reload.
+  if (!t.available && (document.getElementById('h3_turbo') || {}).value === '1') {
+    setH3Turbo(false);
+  }
+}
+
+// Steps and Turbo are the same axis, so only one of them can be in charge.
+// Turbo is, and the pills go visibly dead rather than silently ignored — the
+// server drops the override too (make_job), this just stops it looking live.
+function _h3SyncStepsEnabled() {
+  const on = (document.getElementById('h3_turbo') || {}).value === '1';
+  const row = document.getElementById('h3StepsRow');
+  document.querySelectorAll('#h3StepsGroup [data-h3-steps]').forEach(b => {
+    b.disabled = on;
+    b.classList.toggle('disabled', on);
+  });
+  if (row) {
+    row.style.opacity = on ? '.5' : '';
+    row.title = on ? 'Turbo pins the sampler at 4 steps.' : '';
+  }
+}
+
+function setH3Turbo(on) {
+  const t = h3TurboState();
+  const v = (on && t.available) ? '1' : '0';
+  const inp = document.getElementById('h3_turbo');
+  if (inp) inp.value = v;
+  document.querySelectorAll('#h3TurboGroup [data-h3-turbo]').forEach(b =>
+    b.classList.toggle('active', b.dataset.h3Turbo === v));
+  const note = document.getElementById('h3TurboNote');
+  if (note) {
+    note.hidden = (v !== '1');
+    note.textContent = t.note || '';
+  }
+  if (v === '1') {
+    // Mirror the pinned count into the shared hidden `steps` so the queue card
+    // and the estimate line read the truth (make_job re-stamps it anyway).
+    const s = document.getElementById('steps');
+    if (s) s.value = t.steps || 4;
+    if (typeof setH3Steps === 'function') { try { setH3Steps('auto'); } catch (e) {} }
+  }
+  _h3SyncStepsEnabled();
+  try { localStorage.setItem('phos_h3_turbo', v); } catch (e) {}
+  if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+  if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
+}
+
+// One click, two behaviours, because the pill has two jobs: select Turbo when
+// it is ready, or fetch it when it isn't. Never both — a click that starts a
+// download must not also arm a render that has nothing to render with.
+async function h3TurboClick() {
+  const t = h3TurboState();
+  if (t.available) { setH3Turbo(true); return; }
+  if (!t.supported) {
+    if (typeof phosToast === 'function') {
+      phosToast('This Hailuo H3 pack predates Turbo. Re-run "Install Hailuo H3" '
+                + 'in the Pinokio sidebar to update the clone — your weights stay.',
+                { kind: 'danger' });
+    }
+    return;
+  }
+  const gb = t.download_gb || 0.8;
+  if (!confirm('Download the H3 Turbo adapter?\n\n'
+             + '~' + gb + ' GB in two files, into the H3 pack’s models folder.\n'
+             + 'The adapter is Apache-2.0; the time embedder is read out of the '
+             + 'upstream release by byte range, not downloaded whole.\n\n'
+             + 'Progress streams to the log at the bottom of the page.')) return;
+  try {
+    const r = await fetch('/h3/turbo/install', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    if (typeof phosToast === 'function') {
+      phosToast('Turbo download started — watch the log. The pill turns on by '
+                + 'itself when both files land.', { kind: 'ok' });
+    }
+  } catch (e) {
+    if (typeof phosToast === 'function') {
+      phosToast('Turbo download: ' + (e.message || 'failed'), { kind: 'danger' });
+    }
+  }
+}
+
+document.querySelectorAll('#h3TurboGroup [data-h3-turbo]').forEach(b => {
+  b.onclick = () => (b.dataset.h3Turbo === '1') ? h3TurboClick() : setH3Turbo(false);
 });
 
 function _engineRowVisible() {
@@ -31434,9 +32116,12 @@ function setH3Tier(key) {
     const ov = (document.getElementById('h3_steps') || {}).value || 'auto';
     s.value = (ov !== 'auto' && /^\d+$/.test(ov)) ? parseInt(ov, 10) : tier.steps;
   }
-  // Chained tiers carry an honest artefact note (one prompt is asked of every
-  // window, so a scripted line lands once per window). Surface it where the
-  // user is choosing, not in a tooltip.
+  // Tiers carry an honest note where one is owed and the server owns the
+  // text (H3_TIERS). Two of them exist today: the chained tiers warn that one
+  // prompt is asked of every window (so a scripted line lands once per
+  // window), and the Draft tier says out loud that its 0.25 MP pass resolves
+  // composition and timing but not faces. Surface it where the user is
+  // choosing, not in a tooltip.
   const noteEl = document.getElementById('h3TierNote');
   if (noteEl) {
     const n = tier.note || '';
@@ -31444,7 +32129,286 @@ function setH3Tier(key) {
     noteEl.hidden = !n;
   }
   try { localStorage.setItem('phos_h3_tier', tier.key); } catch (e) {}
+  // Turbo's pill carries THIS tier's estimate, so it has to be re-labelled
+  // whenever the tier moves.
+  if (typeof renderH3Turbo === 'function') { try { renderH3Turbo(); } catch (e) {} }
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+}
+
+// ============================================================================
+// Draft → Finish — commit an H3 draft at a delivery tier
+// ============================================================================
+// The Draft tier is ~3 min against ~8 min for HQ 5s, which only pays off if
+// the good draft can be re-run AS THE SAME CLIP. That means the finish render
+// has to inherit the draft's ACTUAL seed (sidecar `seed_used`, never the `-1`
+// the user submitted) along with the prompt, the first frame, the export
+// canvas and any pinned step count — change any of those and the user gets a
+// different shot, which would make the button a lie.
+//
+// Mechanically this is the Load Params pattern: read the clip's sidecar,
+// restore it into #genForm, and let the ONE submit path run (it owns the
+// double-submit guard, the LoRA-orphan check and the prompt modifiers). The
+// only divergences are that the tier is swapped on the way in, and that the
+// form is submitted for the user instead of being left for them to press
+// Generate — "iterate cheap, then commit" is a single decision, and the
+// restored form is still sitting there afterwards to tweak and re-run.
+
+// A tier by EXACT key. h3TierByKey() falls back to the first tier when the key
+// is unknown, which is right for a picker but wrong here: a clip rendered at a
+// tier this install no longer offers (LTX_H3_DENSE_10S turned back off, an
+// older pack) must read as "not a draft", not as Draft.
+function h3TierByKeyExact(key) {
+  if (!key) return null;
+  return (H3.tiers || []).find(t => t.key === key) || null;
+}
+
+// The tiers a draft can be finished at: every visible tier the server did NOT
+// flag `draft`. Server-side H3_TIERS stays the single source of truth — this
+// filters, it never invents a tier or an eta.
+function h3FinishTargets() {
+  return (H3.tiers || []).filter(t => !t.draft);
+}
+
+// The user's chosen finish tier, sanity-checked against what this install can
+// actually render. Falls back to the server's `finish_default`, then to the
+// first offered tier — so a stale localStorage entry from a pack that has
+// since lost its chained tiers can't pin the button to something unrenderable.
+function h3FinishTierKey() {
+  const targets = h3FinishTargets();
+  if (!targets.length) return null;
+  let saved = null;
+  try { saved = localStorage.getItem('phos_h3_finish_tier'); } catch (e) {}
+  const wanted = [saved, H3.finish_default, 'hq_5s'];
+  for (const k of wanted) {
+    if (k && targets.some(t => t.key === k)) return k;
+  }
+  return targets[0].key;
+}
+
+function h3FinishSetTier(key) {
+  const targets = h3FinishTargets();
+  if (!targets.some(t => t.key === key)) return;
+  try { localStorage.setItem('phos_h3_finish_tier', key); } catch (e) {}
+  // Re-label in place. The clip stays selected — picking a tier is choosing
+  // what the button will do, not doing it.
+  _syncH3FinishAffordance(findOutputByPath(activePath));
+}
+
+// PURE. Given a completed H3 render's sidecar `params` and the tier to finish
+// at, return the exact #genForm field→value map that reproduces that clip at
+// the new tier — or null when the sidecar isn't a finishable H3 draft.
+//
+// No DOM, no globals: this is the piece that has to be RIGHT (it is where the
+// seed carry-over lives), so it is kept callable in isolation and unit-tested
+// against real sidecar shapes.
+//
+// Every key it emits is in the make_job allowlist — engine, h3_tier,
+// h3_upscale, h3_steps, mode, prompt, negative_prompt, seed, image. A field
+// that isn't in that dict silently no-ops on /queue/add, which is the known
+// trap in this codebase; adding a key here means adding it there too.
+function h3FinishFieldsFromSidecar(p, tierKey) {
+  if (!p || typeof p !== 'object') return null;
+  if (p.engine !== 'h3') return null;
+  if (!tierKey) return null;
+  // seed_used is the integer the H3 path resolved and recorded at render time.
+  // `seed` is what the user SUBMITTED and is '-1' whenever they left it random,
+  // so preferring it would hand the finish render a fresh roll — the exact bug
+  // the Manual loadParams fix (b024bb5) had to correct. Same contract here.
+  const seedRaw = (p.seed_used != null && String(p.seed_used) !== ''
+                   && String(p.seed_used) !== '-1')
+    ? p.seed_used
+    : p.seed;
+  const seed = (seedRaw == null || String(seedRaw) === '') ? '-1' : String(seedRaw);
+  // H3 serves t2v and i2v only; anything else in the sidecar is a corrupt or
+  // hand-edited file, and t2v is the safe read (a bogus mode would be snapped
+  // back server-side anyway, but then the first frame would be silently lost).
+  const mode = (p.mode === 'i2v') ? 'i2v' : 't2v';
+  const fields = {
+    mode: mode,
+    engine: 'h3',
+    h3_tier: String(tierKey),
+    prompt: String(p.prompt || ''),
+    negative_prompt: String(p.negative_prompt || ''),
+    seed: seed,
+    // Export canvas: '' lets the caller keep whatever the panel has, which
+    // matters for sidecars written before h3_upscale existed.
+    h3_upscale: (typeof p.h3_upscale === 'string' && p.h3_upscale) ? p.h3_upscale : '',
+    // The sidecar stores the resolved override as an int, 0 = "the tier's own
+    // count". The form's pills speak 'auto' | '12' | '16' | '20'; anything
+    // outside that set (an older sidecar, a curl'd job) reads as auto so the
+    // finish tier's tuned count is used rather than a depth no pill can show.
+    h3_steps: (['12', '16', '20'].indexOf(String(p.h3_steps)) !== -1)
+      ? String(p.h3_steps) : 'auto',
+    // Turbo carries over: a draft judged with the 4-step sampler should be
+    // finished with it too, or the Finish render is a different recipe as well
+    // as a different tier. setH3Turbo re-checks availability, so a sidecar from
+    // an install that has since lost the files lands on Standard, not on a
+    // mode that would fail at queue time.
+    h3_turbo: !!p.h3_turbo,
+    // First frame. i2v without one is not renderable, so it is carried
+    // verbatim; on t2v it is deliberately empty — H3 ignores it and leaving a
+    // stale path in the picker would misrepresent what was queued.
+    image: (mode === 'i2v' && typeof p.image === 'string') ? p.image : '',
+  };
+  if (mode === 'i2v' && !fields.image) return null;
+  return fields;
+}
+
+// Show/hide + re-label the Finish control for the selected output. Called from
+// selectOutput on every selection. Reads o.engine / o.h3_tier, which
+// list_outputs() lifts out of the sidecar read it already performs — no fetch
+// on the selection path.
+function _syncH3FinishAffordance(o) {
+  const wrap = document.getElementById('h3FinishWrap');
+  if (!wrap) return;
+  const label = document.getElementById('h3FinishLabel');
+  const btn = document.getElementById('h3FinishBtn');
+  const sel = document.getElementById('h3FinishTier');
+  const srcTier = (o && o.engine === 'h3') ? h3TierByKeyExact(o.h3_tier) : null;
+  const targetKey = h3FinishTierKey();
+  const target = targetKey ? h3TierByKeyExact(targetKey) : null;
+  // Three ways to be uninteresting: not an H3 clip, an H3 clip already at a
+  // delivery tier, or an install with no non-draft tier to offer.
+  if (!srcTier || !srcTier.draft || !target) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  // The eta is the tier's own string from H3_TIERS — never a number computed
+  // here, so the measured wall times stay in one place. The tier's label has
+  // its own "·" ("HQ · 5s"), which is flattened to "HQ 5s" so the one dot left
+  // separates the tier from its cost. Naming the LENGTH matters: "HQ" alone
+  // reads the same for the 3 s and 5 s tiers and only the eta would differ.
+  const name = String(target.label).replace(/\s*·\s*/g, ' ').trim();
+  if (label) label.textContent = `Finish at ${name} · ${target.eta}`;
+  if (btn) {
+    btn.title = `Re-render this draft at ${target.label} (${target.spec}, `
+              + `${target.eta}) with the same prompt, seed and first frame`;
+  }
+  if (sel) {
+    const opts = h3FinishTargets()
+      .map(t => `<option value="${escapeHtml(t.key)}"${t.key === target.key ? ' selected' : ''}>`
+              + `${escapeHtml(t.label)} · ${escapeHtml(t.eta)}</option>`)
+      .join('');
+    // Only rebuild when the option set actually changed — this runs on every
+    // gallery click and blowing away the <select> each time would fight the
+    // native dropdown if it happened to be open.
+    if (sel.dataset.built !== opts) {
+      sel.innerHTML = opts;
+      sel.dataset.built = opts;
+    }
+    sel.value = target.key;
+  }
+}
+
+// Commit the selected draft. Restores the sidecar into the form (Load Params
+// pattern) with the tier swapped, then submits through #genForm's own handler.
+async function h3FinishActive() {
+  if (!activePath) return;
+  const o = findOutputByPath(activePath);
+  const srcTier = (o && o.engine === 'h3') ? h3TierByKeyExact(o.h3_tier) : null;
+  if (!srcTier || !srcTier.draft) return;   // button shouldn't be visible
+  const targetKey = h3FinishTierKey();
+  const target = targetKey ? h3TierByKeyExact(targetKey) : null;
+  if (!target) return;
+
+  let p = null;
+  try {
+    const r = await fetch('/sidecar?path=' + encodeURIComponent(activePath));
+    if (!r.ok) throw new Error('no sidecar (older output?)');
+    const data = await r.json();
+    p = data && data.params;
+  } catch (e) {
+    if (typeof phosToast === 'function') {
+      phosToast('Finish: ' + (e.message || 'failed to read sidecar'), { kind: 'danger' });
+    }
+    return;
+  }
+  const fields = h3FinishFieldsFromSidecar(p, target.key);
+  if (!fields) {
+    if (typeof phosToast === 'function') {
+      phosToast('Finish: this clip\'s sidecar is missing what the re-render needs.',
+                { kind: 'danger' });
+    }
+    return;
+  }
+
+  // ---- restore into the form -------------------------------------------
+  // Leave Image Studio / Train first, or setMode alone looks like a no-op
+  // (body[data-workflow] keeps #genForm hidden) — same reason animateFromPhoto
+  // calls this.
+  if (typeof workflowSwitch === 'function') { try { workflowSwitch('manual'); } catch (e) {} }
+  setMode(fields.mode);
+  if (fields.mode === 'i2v') {
+    // setMode('i2v') copies the #i2vMode SELECT into the hidden #mode, and
+    // that select may still be sitting on 'i2v_clean_audio' from an earlier
+    // LTX render. H3 doesn't serve that mode — make_job would silently demote
+    // the job to LTX and render the wrong engine at H3 geometry. Pin both,
+    // same as loadParams does when restoring an i2v sidecar.
+    const i2vSel = document.getElementById('i2vMode');
+    if (i2vSel) i2vSel.value = 'i2v';
+    document.getElementById('mode').value = 'i2v';
+  }
+  // setMode() runs _syncEngineForMode(), which re-applies the PERSISTED
+  // engine — so the engine has to be forced AFTER it, not before. setEngine
+  // re-runs every gate (RAM, install, mode) and returns what it actually
+  // landed on; if that isn't h3 the job would silently queue on LTX at H3
+  // geometry, so bail loudly instead.
+  const engine = (typeof setEngine === 'function') ? setEngine('h3') : 'ltx';
+  if (engine !== 'h3') {
+    const note = (document.getElementById('engineRowNote') || {}).textContent || '';
+    if (typeof phosToast === 'function') {
+      phosToast('Finish needs the Hailuo H3 engine. ' + note, { kind: 'danger' });
+    }
+    return;
+  }
+  document.getElementById('prompt').value = fields.prompt;
+  document.getElementById('negative_prompt').value = fields.negative_prompt;
+  if (typeof syncAvoidRowFromValue === 'function') {
+    try { syncAvoidRowFromValue(); } catch (e) {}
+  }
+  if (fields.image) {
+    // pickerSetImage keeps the preview tile + recent-strip selection in sync
+    // with the hidden input. snapAspect:false because the H3 tier owns the
+    // geometry (setH3Tier below stamps width/height/frames).
+    if (typeof pickerSetImage === 'function') {
+      pickerSetImage('image', fields.image, { snapAspect: false });
+    } else {
+      document.getElementById('image').value = fields.image;
+    }
+  }
+  if (fields.h3_upscale && typeof setH3Upscale === 'function') setH3Upscale(fields.h3_upscale);
+  if (typeof setH3Steps === 'function') setH3Steps(fields.h3_steps);
+  // Turbo before the tier: setH3Turbo forces the Steps pills back to 'auto',
+  // and setH3Tier below re-reads them when it stamps the resolved count.
+  if (typeof setH3Turbo === 'function') setH3Turbo(!!fields.h3_turbo);
+  // Tier LAST of the H3 controls: setH3Tier stamps width/height/frames/steps
+  // from the tier table, so anything geometry-related set after it would be
+  // fighting the source of truth.
+  setH3Tier(fields.h3_tier);
+  // Seed after the tier for the same reason it comes last in loadParams:
+  // nothing downstream may quietly re-randomise it.
+  document.getElementById('seed').value = fields.seed;
+  if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
+  if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
+  const formPane = document.querySelector('aside.form-pane');
+  if (formPane) formPane.scrollTop = 0;
+
+  // ---- queue it ---------------------------------------------------------
+  // requestSubmit(), not submit(): the latter bypasses the submit listener
+  // that owns the double-click guard and the prompt modifiers.
+  const form = document.getElementById('genForm');
+  if (!form || typeof form.requestSubmit !== 'function') {
+    if (typeof phosToast === 'function') {
+      phosToast('Finish: form not ready — press Generate.', { kind: 'danger' });
+    }
+    return;
+  }
+  if (typeof phosToast === 'function') {
+    phosToast(`Finishing at ${target.label} · ${target.eta} · seed ${fields.seed}`,
+              { kind: 'success' });
+  }
+  form.requestSubmit();
 }
 
 // Modes H3 can serve. Anything else must run on LTX.
@@ -31525,6 +32489,8 @@ function setEngine(engine, opts) {
     setH3Upscale((document.getElementById('h3_upscale') || {}).value
                  || H3.default_upscale || 'fit_720p');
     setH3Steps((document.getElementById('h3_steps') || {}).value || 'auto');
+    renderH3Turbo();
+    setH3Turbo((document.getElementById('h3_turbo') || {}).value === '1');
     // LTX post-processing doesn't run on an H3 render (make_job neutralises
     // all three server-side). Mirror that in the UI or the derived line lies:
     // it was reading "768×448 → 1280×720 fit" for a render that ships 768×448.
@@ -31589,9 +32555,23 @@ function updateH3Availability(s) {
                // card even when `available` itself hasn't moved yet.
                || (next.repairable !== H3.repairable)
                || (next.reason !== H3.reason)
+               // Turbo's 0.8 GB is downloaded from inside the panel, so this is
+               // what turns the dashed pill into a live one the moment both
+               // files land — no reload, which is what its toast promises.
+               || (((next.turbo || {}).available) !== ((H3.turbo || {}).available))
+               || (((next.turbo || {}).supported) !== ((H3.turbo || {}).supported))
                || ((next.tiers || []).length !== (H3.tiers || []).length);
   H3 = next;
-  if (changed) setEngine(currentEngine(), { persist: false });
+  if (changed) {
+    setEngine(currentEngine(), { persist: false });
+    // The Finish button's label and its picker are both derived from H3.tiers,
+    // so a pack install/repair that changes the offered tiers has to re-label
+    // the currently-selected clip's affordance too — otherwise it keeps
+    // advertising a tier this install just stopped (or started) offering.
+    if (typeof _syncH3FinishAffordance === 'function') {
+      try { _syncH3FinishAffordance(findOutputByPath(activePath)); } catch (e) {}
+    }
+  }
 }
 
 document.querySelectorAll('#engineGroup .engine-chip').forEach(b => b.onclick = () => {
@@ -33660,6 +34640,12 @@ function selectOutput(path) {
   const animBtn = document.getElementById('animateBtn');
   if (useExtBtn) useExtBtn.style.display = isPhoto ? 'none' : '';
   if (animBtn) animBtn.style.display = isPhoto ? '' : 'none';
+  // "Finish at …" — only for a completed H3 render whose tier is a draft
+  // tier. Decided from o.engine / o.h3_tier (both sidecar-derived, already in
+  // the /status payload), so no extra request rides the selection path.
+  if (typeof _syncH3FinishAffordance === 'function') {
+    try { _syncH3FinishAffordance(isPhoto ? null : o); } catch (e) {}
+  }
 }
 
 // Expand lightbox — full-viewport viewer for the active output. Reuses
@@ -34245,9 +35231,16 @@ function renderOutputInfoBody(path, data) {
     const h3TierDef = ((H3 && H3.tiers) || []).find(t => t.key === h3TierKey);
     genRows.push(`<dt>Engine</dt><dd>Hailuo H3</dd>`);
     genRows.push(`<dt>H3 tier</dt><dd>${escapeHtml(h3TierDef ? h3TierDef.label : (h3TierKey || '—'))}</dd>`);
-    // Steps only earns a row when the user pinned a depth — the tier default
-    // is already implied by the tier row.
-    if (Number(p.h3_steps || 0) > 0) {
+    // Turbo changed the sampler recipe, so it earns a row on every clip that
+    // used it — it is the difference between two otherwise identical renders.
+    if (p.h3_turbo) {
+      const tinfo = (data && data.h3 && data.h3.turbo) || null;
+      const applied = tinfo && tinfo.applied && tinfo.applied.applied;
+      genRows.push(`<dt>Turbo</dt><dd>on · ${escapeHtml(String(p.steps || 4))}-step `
+        + `distill LoRA${applied ? ' · ' + escapeHtml(String(applied)) + ' modules applied' : ''}</dd>`);
+    } else if (Number(p.h3_steps || 0) > 0) {
+      // Steps only earns a row when the user pinned a depth — the tier default
+      // is already implied by the tier row.
       genRows.push(`<dt>Steps</dt><dd>${escapeHtml(String(p.steps || p.h3_steps))} · tier default overridden</dd>`);
     }
   } else {
