@@ -26491,33 +26491,40 @@ HTML = r"""<!doctype html>
             <div class="quality-strip pill-group" id="h3LengthGroup"></div>
           </div>
           <!-- H3 尺寸控制:第1行选比例,第2行选系数 -->
-          <div id="h3CustomDims" data-h3-only hidden style="display:none;flex-direction:column;gap:8px;margin:6px 0 8px 0;padding:8px 10px;background:var(--bg-2,#16161c);border:1px solid var(--border,#333);border-radius:10px;">
+          <div id="h3CustomDims" data-h3-only hidden style="display:none;flex-direction:column;gap:6px;margin:4px 0 6px 0;padding:8px 10px;background:var(--bg-2,#16161c);border:1px solid var(--border,#333);border-radius:10px;max-width:100%;overflow:hidden;">
             <!-- 第1行:画面比例 -->
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-              <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;flex:0 0 auto;width:48px;">比例</span>
-              <div style="display:flex;gap:5px;flex-wrap:wrap;" id="h3RatioChips">
-                <button type="button" class="ratio-chip" data-ratio="169" style="padding:6px 14px;font-size:13px;border-radius:9px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;">🖥️ 16:9 横屏</button>
-                <button type="button" class="ratio-chip" data-ratio="916" style="padding:6px 14px;font-size:13px;border-radius:9px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">📱 9:16 竖屏</button>
-                <button type="button" class="ratio-chip" data-ratio="11" style="padding:6px 14px;font-size:13px;border-radius:9px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">⬛ 1:1 方形</button>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span style="font-size:12px;color:var(--muted);font-weight:700;flex:0 0 auto;">比例</span>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;" id="h3RatioChips">
+                <button type="button" class="ratio-chip" data-ratio="169" style="padding:5px 10px;font-size:12px;border-radius:8px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;white-space:nowrap;">🖥️ 16:9</button>
+                <button type="button" class="ratio-chip" data-ratio="916" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">📱 9:16</button>
+                <button type="button" class="ratio-chip" data-ratio="11" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">⬛ 1:1</button>
               </div>
             </div>
-            <!-- 第2行:清晰度系数 -->
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-              <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;flex:0 0 auto;width:48px;">清晰度</span>
+            <!-- 第2行:清晰度系数 + 结果 -->
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span style="font-size:12px;color:var(--muted);font-weight:700;flex:0 0 auto;">清晰度</span>
               <div style="display:flex;gap:4px;flex-wrap:wrap;" id="h3MpChips">
-                <button type="button" class="mp-chip" data-mp="0.2" style="padding:5px 12px;font-size:13px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.2</button>
-                <button type="button" class="mp-chip" data-mp="0.4" style="padding:5px 12px;font-size:13px;border-radius:8px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;">0.4</button>
-                <button type="button" class="mp-chip" data-mp="0.6" style="padding:5px 12px;font-size:13px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.6</button>
-                <button type="button" class="mp-chip" data-mp="0.8" style="padding:5px 12px;font-size:13px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.8</button>
-                <button type="button" class="mp-chip" data-mp="0.97" style="padding:5px 12px;font-size:13px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">最高</button>
+                <button type="button" class="mp-chip" data-mp="0.2" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">0.2</button>
+                <button type="button" class="mp-chip" data-mp="0.4" style="padding:5px 10px;font-size:12px;border-radius:8px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;white-space:nowrap;">0.4</button>
+                <button type="button" class="mp-chip" data-mp="0.6" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">0.6</button>
+                <button type="button" class="mp-chip" data-mp="0.8" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">0.8</button>
+                <button type="button" class="mp-chip" data-mp="0.97" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">最高</button>
               </div>
-              <!-- 结果显示 -->
-              <span id="h3MpHint" style="font-size:13px;color:var(--accent-bright,#5eeaff);font-weight:600;margin-left:auto;">→ 832×480</span>
+            </div>
+            <!-- 第3行:结果显示(比例×系数=分辨率) -->
+            <div style="display:flex;align-items:center;gap:6px;font-size:13px;padding:4px 0 0;flex-wrap:wrap;">
+              <span style="color:var(--muted);">📐</span>
+              <span id="h3RatioLabel" style="color:var(--text);font-weight:600;">16:9</span>
+              <span style="color:var(--muted);">×</span>
+              <span id="h3MpLabel" style="color:var(--text);font-weight:600;">0.4</span>
+              <span style="color:var(--muted);">=</span>
+              <span id="h3MpHint" style="color:var(--accent-bright,#5eeaff);font-weight:700;">832×480</span>
             </div>
             <!-- 高级:手动宽高(折叠) -->
             <details style="font-size:11px;color:var(--muted);">
               <summary style="cursor:pointer;padding:2px 0;">高级:手动指定宽×高</summary>
-              <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+              <div style="display:flex;gap:6px;align-items:center;margin-top:4px;flex-wrap:wrap;">
                 <input type="number" id="h3CustomW" min="32" max="1344" step="32" placeholder="宽" style="width:70px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
                 <span style="color:var(--muted);">×</span>
                 <input type="number" id="h3CustomH" min="32" max="768" step="32" placeholder="高" style="width:70px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
@@ -34944,8 +34951,14 @@ function h3ApplyDims() {
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
   set('width', w);
   set('height', h);
+  // 显示:比例 × 系数 = 分辨率
   const hint = document.getElementById('h3MpHint');
-  if (hint) hint.textContent = '→ ' + w + '×' + h;
+  if (hint) hint.textContent = w + '×' + h;
+  const ratioNames = { '169': '16:9', '916': '9:16', '11': '1:1' };
+  const rLabel = document.getElementById('h3RatioLabel');
+  if (rLabel) rLabel.textContent = ratioNames[h3CurrentRatio] || '16:9';
+  const mLabel = document.getElementById('h3MpLabel');
+  if (mLabel) mLabel.textContent = h3CurrentMp === 0.97 ? '最高' : h3CurrentMp;
   // 同步手动宽高框
   const wEl = document.getElementById('h3CustomW');
   const hEl = document.getElementById('h3CustomH');
@@ -34955,7 +34968,6 @@ function h3ApplyDims() {
 
 function h3SetRatio(ratio) {
   h3CurrentRatio = ratio;
-  // 高亮比例 chip
   document.querySelectorAll('#h3RatioChips .ratio-chip').forEach(c => {
     const active = c.dataset.ratio === ratio;
     c.style.borderWidth = active ? '2px' : '1px';
@@ -34968,7 +34980,6 @@ function h3SetRatio(ratio) {
 
 function h3SetMp(mp) {
   h3CurrentMp = mp;
-  // 高亮系数 chip
   document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
     const active = Math.abs(parseFloat(c.dataset.mp) - mp) < 0.001;
     c.style.borderWidth = active ? '2px' : '1px';
