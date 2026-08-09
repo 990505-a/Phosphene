@@ -34648,8 +34648,14 @@ function renderH3Axes() {
   const meta = document.getElementById('h3LengthMeta');
   const cell = h3CellFor(curQ, curL);
   if (meta) {
+    // 自定义尺寸控件激活时,显示控件算出的尺寸而非 tier 的 cell 尺寸
+    let _w = cell ? cell.width : 0, _h = cell ? cell.height : 0;
+    if (typeof h3CalcDims === 'function' && typeof h3CurrentRatio !== 'undefined') {
+      const _cd = h3CalcDims(h3CurrentRatio, h3CurrentMp);
+      _w = _cd.w; _h = _cd.h;
+    }
     meta.textContent = cell
-      ? `${cell.width}×${cell.height} · ${cell.frames}f · ${h3CellEta(cell)}`
+      ? `${_w}×${_h} · ${cell.frames}f · ${h3CellEta(cell)}`
       : '';
   }
 }
