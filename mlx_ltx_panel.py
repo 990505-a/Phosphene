@@ -19360,10 +19360,10 @@ HTML = r"""<!doctype html>
     }
     .form-pane, .stage-pane {
       background: var(--panel); border: 1px solid var(--border);
-      border-radius: var(--radius); overflow: hidden;
+      border-radius: var(--radius); overflow: auto;
       display: flex; flex-direction: column; min-height: 0;
     }
-    .form-pane { padding: 16px; overflow-y: auto; }
+    .form-pane { padding: 16px; overflow-y: auto; overflow-x: auto; }
     .stage-pane { padding: 0; }
 
     /* Train Character is its own workflow tier alongside Manual.
@@ -26491,7 +26491,7 @@ HTML = r"""<!doctype html>
             <div class="quality-strip pill-group" id="h3LengthGroup"></div>
           </div>
           <!-- H3 尺寸控制:第1行选比例,第2行选系数 -->
-          <div id="h3CustomDims" data-h3-only hidden style="display:none;flex-direction:column;gap:6px;margin:4px 0 6px 0;padding:8px 10px;background:var(--bg-2,#16161c);border:1px solid var(--border,#333);border-radius:10px;max-width:100%;overflow:hidden;">
+          <div id="h3CustomDims" data-h3-only hidden style="display:none;flex-direction:column;gap:6px;margin:4px 0 6px 0;padding:8px 10px;background:var(--bg-2,#16161c);border:1px solid var(--border,#333);border-radius:10px;">
             <!-- 第1行:画面比例 -->
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
               <span style="font-size:12px;color:var(--muted);font-weight:700;flex:0 0 auto;">比例</span>
