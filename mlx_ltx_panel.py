@@ -5255,94 +5255,50 @@ def _h3_qualities() -> dict[str, dict]:
     still EXIST in the table so a sidecar written while its flag was on keeps
     resolving after the flag goes off."""
     out: dict[str, dict] = {
+        # ===== 全部标准视频比例(16:9 / 9:16 / 1:1),不再有 5:3、12:7、7:4 =====
         "draft": {
-            "key": "draft", "label": "Draft", "order": 0,
-            "width": 640, "height": 384,
-            "blurb": "Fastest look-see at 0.25 MP. Good enough to judge "
-                     "composition, motion and dialogue timing.",
+            "key": "draft", "label": "预览", "order": 0,
+            "width": 512, "height": 288,
+            "blurb": "16:9 · 512×288。最快预览构图和运镜。",
             "draft": True,
             "note": H3_TIER_DRAFT_NOTE,
             "offered": True,
         },
         "standard": {
-            "key": "standard", "label": "Standard", "order": 1,
-            "width": 768, "height": 448,
-            "blurb": "The workhorse canvas — every chained-window measurement "
-                     "on this Mac was taken here. 12:7, so a 720p/1080p export "
-                     "pads bars at the sides.",
+            "key": "standard", "label": "流畅", "order": 1,
+            "width": 800, "height": 448,
+            "blurb": "16:9 · 800×448。日常使用,速度与画质平衡。",
             "offered": True,
         },
-        # The only true-16:9 delivery canvas H3 can serve (see the block comment
-        # above for why k=1 and k=3 are out). MEASURED at exactly this geometry
-        # and exactly 8 forwards — QUALITY_LOOP.md R1: 22,923 packed rows,
-        # 126.0 s/step, 90.5 s VAE decode, 10.71 GiB decode peak, 18.8 min wall.
-        # Denoise never left 37.6 GiB active — the SAME as 768×448, because the
-        # DiT weights dominate and the activations are small next to them. There
-        # is no memory wall here, which is why it is a quality and not a lab toy,
-        # and why it now reaches 10 s and 15 s like every other canvas.
-        # What it buys, same seed, same still, same forwards (R0 vs R1, judged at
-        # 1:1 on a 1080p delivery): eyebrows resolve into individual hairs,
-        # forehead gets pores instead of wax, eyelashes exist at all, fur reads as
-        # strands — plus the pillarbox goes away and 1080p drops from a 2.41×
-        # enlargement to 1.875×.
         "high": {
-            "key": "high", "label": "High", "order": 2,
+            "key": "high", "label": "高清", "order": 2,
             "width": 1024, "height": 576,
-            "blurb": "True 16:9 — the only canvas that exports to 720p as a "
-                     "pure 1.25× scale with no bars, and it resolves face "
-                     "detail 768×448 cannot. The recommended delivery canvas: "
-                     "Native is sharper still, but costs more and needs bars.",
+            "blurb": "16:9 · 1024×576(576p)。推荐画质,真 16:9 无黑边。",
             "offered": True,
         },
-        # H3's OWN canvas — what `resolve_canvas_size` picks for itself at the
-        # model's 1.03 MP clamp, and the ceiling of these open weights (they are
-        # 768p-class; nothing above this is a resolution the model has seen).
-        # It sat out of the table until 2026-08-06 for exactly one reason —
-        # 44:51 for a 5 s window, which the owner looked at and passed on — and
-        # Turbo is what changed the verdict: 19.9 min end to end, measured, at
-        # R2-class quality. Not 16:9: 7:4 (1.75), so the export pass puts thin
-        # bars top and bottom; the export note under the Export row says so, and
-        # it is generated from the ffmpeg plan that actually runs.
         "native": {
-            "key": "native", "label": "Native", "order": 3,
-            "width": 1344, "height": 768,
-            "blurb": "The model's own canvas at its 1.03 MP ceiling — the most "
-                     "detail H3 can produce. 7:4, so an export adds thin bars "
-                     "top and bottom. Worth it with Turbo on; a long wait "
-                     "without.",
+            "key": "native", "label": "最高", "order": 3,
+            "width": 1312, "height": 736,
+            "blurb": "16:9 · 1312×736。接近模型 1.03MP 上限,最高细节。",
             "offered": True,
         },
-        # ===== 官方约束内的实用档位(32倍数 + ≤1.03MP) =====
         "vertical_high": {
-            "key": "vertical_high", "label": "竖屏 9:16", "order": 4,
+            "key": "vertical_high", "label": "竖屏高清", "order": 4,
             "width": 576, "height": 1024,
-            "blurb": "竖屏 9:16 · 576×1024。High 的竖屏版,适合手机短视频。",
+            "blurb": "9:16 · 576×1024。竖屏高清,适合手机短视频。",
             "offered": True,
         },
         "vertical_native": {
             "key": "vertical_native", "label": "竖屏最高", "order": 5,
-            "width": 768, "height": 1344,
-            "blurb": "竖屏 7:4 · 768×1344。Native 竖屏版,短边顶满 768,细节最多。",
+            "width": 704, "height": 1248,
+            "blurb": "9:16 · 704×1248。竖屏最高画质。",
             "offered": True,
         },
         "square": {
-            "key": "square", "label": "方形 1:1", "order": 6,
+            "key": "square", "label": "方形", "order": 6,
             "width": 960, "height": 960,
-            "blurb": "正方形 1:1 · 960×960。适合社交媒体、头像、Instagram。",
+            "blurb": "1:1 · 960×960。适合社交媒体、头像、Instagram。",
             "offered": True,
-        },
-        # Off by default, behind an env flag, for the same reason the dense pass
-        # is: reachable for the A/B that would justify it, not put in front of
-        # users until that A/B exists.
-        "preview": {
-            "key": "preview", "label": "Preview 16:9", "order": -1,
-            "width": 512, "height": 288,
-            "blurb": "Experimental 16:9 look-see at 0.15 MP — framing only, and "
-                     "never measured. Exactly 2× up to High.",
-            "draft": True,
-            "note": H3_TIER_WIDE_DRAFT_NOTE,
-            "offered": os.environ.get("LTX_H3_WIDE_DRAFT", "").strip()
-                       in ("1", "true", "yes"),
         },
     }
     for q in out.values():
@@ -5536,7 +5492,7 @@ H3_TIER_ALIASES: dict[str, str] = {
 # recommendation is carried by the label, the blurb and the export note, not by
 # silently spending the user's afternoon.
 H3_TIER_DEFAULT = "draft_3s"
-H3_QUALITY_DEFAULT = "draft"
+H3_QUALITY_DEFAULT = "high"
 H3_LENGTH_DEFAULT = "3s"
 # Where "Finish at …" sends a clip. Empty string = ONE RUNG UP from whatever the
 # clip was rendered at, which is the same instinct the old `hq_5s` default
@@ -18526,6 +18482,127 @@ def _resolve_cap_tier() -> str:
     return "q8" if SYSTEM_CAPS.get("allows_q8") else "q4"
 
 
+def _responsive_css() -> str:
+    """响应式适配 CSS — 让 Phosphene 在平板/手机上也能用。
+    原始界面只有 1 个 reduced-motion 媒体查询,没有任何断点适配。
+    这里注入针对窄屏的全局覆盖,不改原有 CSS。"""
+    return """
+<style id="ph-responsive">
+/* ===== 平板/中等窗口 (≤1280px) ===== */
+@media (max-width: 1280px) {
+  body { font-size: 14px !important; }
+  /* 主布局从双栏变单栏 */
+  .app-shell, .main-grid, .composer-grid {
+    grid-template-columns: 1fr !important;
+    flex-direction: column !important;
+  }
+  /* 左右栏堆叠 */
+  .left-panel, .right-panel, .sidebar, .main-content {
+    width: 100% !important; max-width: 100% !important; flex: 1 1 100% !important;
+  }
+  /* 内边距收紧 */
+  .container, .wrapper, .panel, .card { padding: 12px !important; }
+  /* 按钮可换行 */
+  .pill-group { flex-wrap: wrap !important; gap: 6px !important; }
+  /* header 允许换行,按钮不挤出屏幕 */
+  body > header { flex-wrap: wrap !important; padding: 8px 12px !important; gap: 8px !important; }
+  /* 模态弹窗适应 */
+  .models-modal, .settings-modal { width: 95vw !important; max-width: 95vw !important; }
+  .models-card { max-height: 90vh !important; overflow-y: auto !important; }
+}
+
+/* ===== 手机 (≤768px) ===== */
+@media (max-width: 768px) {
+  body { font-size: 13px !important; -webkit-text-size-adjust: 100%; }
+  /* 所有 padding/margin 收小 */
+  * { box-sizing: border-box; }
+  .container, .wrapper, .panel, .card, .section { padding: 8px !important; margin: 4px 0 !important; }
+  /* 标题缩小 */
+  h1 { font-size: 1.3em !important; }
+  h2 { font-size: 1.15em !important; }
+  h3 { font-size: 1.05em !important; }
+  /* ★ header:允许独立横滚,设置按钮不再被裁掉 */
+  body > header { overflow-x: auto !important; overflow-y: hidden !important;
+                  height: auto !important; min-height: 56px !important; padding: 8px 12px !important;
+                  flex-wrap: nowrap !important; -webkit-overflow-scrolling: touch; }
+  body > header .brand { flex-shrink: 0 !important; }
+  body > header .spacer { flex: 0 0 auto !important; min-width: 8px !important; }
+  #settingsBtn { flex-shrink: 0 !important; }
+  /* 输入框/文本域占满宽 + 更大触控区 */
+  input[type="text"], input[type="number"], input[type="url"], textarea, select {
+    width: 100% !important; min-height: 36px !important; font-size: 15px !important;
+  }
+  textarea { min-height: 80px !important; }
+  /* 按钮更大触控友好 */
+  button, .pill-btn, .q-chip {
+    min-height: 36px !important; padding: 8px 14px !important; font-size: 14px !important;
+  }
+  /* 主按钮占满宽 */
+  button.primary, #genBtn, .primary-btn {
+    width: 100% !important; min-height: 44px !important; font-size: 15px !important;
+  }
+  /* 画质/时长档位:独立横滚,不带动整页 */
+  .quality-strip, #qualityGroup, #h3QualityGroup, #h3LengthGroup {
+    overflow-x: auto !important; flex-wrap: nowrap !important;
+    -webkit-overflow-scrolling: touch; padding-bottom: 4px;
+  }
+  .quality-strip .q-chip { flex: 0 0 auto !important; min-width: 80px !important; }
+  /* 方向栏独立横滚 */
+  #aspectRow, #aspectGroup {
+    overflow-x: auto !important; flex-wrap: nowrap !important;
+    -webkit-overflow-scrolling: touch;
+  }
+  #aspectGroup .pill-btn { flex: 0 0 auto !important; }
+  /* 其他 pill-group 仍可换行 */
+  .pill-group:not(#qualityGroup):not(#h3QualityGroup):not(#h3LengthGroup):not(#aspectGroup) {
+    flex-wrap: wrap !important; gap: 4px !important;
+  }
+  .quality-strip .q-chip { flex: 1 1 auto !important; min-width: 80px !important; }
+  /* 方向选择器换行 */
+  #aspectRow { flex-wrap: wrap !important; gap: 4px !important; }
+  /* 输出网格单列 */
+  .gallery, .outputs-grid, .output-list {
+    grid-template-columns: 1fr !important;
+  }
+  .output-tile, .gallery-item { width: 100% !important; }
+  /* 隐藏次要元素,聚焦核心 */
+  .dev-only, .stats-bar, .profile-badge { display: none !important; }
+  /* 提示词区占满 */
+  .prompt-area, .prompt-wrap { width: 100% !important; }
+  /* 模态弹窗全屏 */
+  .models-modal { width: 100vw !important; height: 100vh !important; max-height: 100vh !important;
+                   border-radius: 0 !important; }
+  .models-card { width: 100% !important; height: 100% !important; max-height: 100% !important;
+                 border-radius: 0 !important; }
+  /* 标签栏可横滚 */
+  .tabs, nav.tabs { overflow-x: auto !important; flex-wrap: nowrap !important;
+                     -webkit-overflow-scrolling: touch; }
+  /* H3 自定义尺寸区域换行 */
+  #h3CustomDims { flex-wrap: wrap !important; }
+  #h3CustomDims > div { flex-wrap: wrap !important; }
+}
+
+/* ===== 小手机 (≤480px) ===== */
+@media (max-width: 480px) {
+  body { font-size: 12px !important; }
+  .container, .panel { padding: 6px !important; }
+  /* 画质档位每个占满一行 */
+  .quality-strip .q-chip { flex: 1 1 100% !important; }
+  /* 方向按钮占满 */
+  #aspectGroup .pill-btn { flex: 1 1 calc(50% - 4px) !important; min-width: 0 !important; }
+}
+
+/* ===== 触控设备(手机/平板)优化 ===== */
+@media (hover: none) and (pointer: coarse) {
+  /* 触控时增大点击区域 */
+  button, .pill-btn, a, [onclick] { min-height: 36px; }
+  /* 禁用 hover 效果(触屏没有 hover,避免卡在 hover 态) */
+  *:hover { transition: none !important; }
+}
+</style>
+"""
+
+
 def _i18n_script() -> str:
     """Injects a browser-side language switcher (EN<->ZH) for core UI labels.
     Activated by the dropdown in Settings; choice persists in localStorage."""
@@ -18764,7 +18841,7 @@ def _i18n_script() -> str:
   window.PhospheneI18N = { applyLang, getLang: () => currentLang };
   // Init on DOM ready
   function init(){
-    const saved = localStorage.getItem('phosphene-lang') || 'en';
+    const saved = localStorage.getItem('phosphene-lang') || 'zh';
     if (saved === 'zh') { applyLang('zh'); }
     startObserver();
     const sel = document.getElementById('langSelect');
@@ -18837,7 +18914,8 @@ def page() -> str:
             .replace("__PANEL_VERSION__", html.escape(_read_local_version() or "dev"))
             .replace("__ENGINE_RULES__", _engine_css())
             .replace("__CAP_TIER__", cap_tier)
-            .replace("__I18N_JS__", _i18n_script()))
+            .replace("__I18N_JS__", _i18n_script())
+            .replace("</head>", _responsive_css() + "</head>"))
 
 
 HTML = r"""<!doctype html>
@@ -18919,7 +18997,7 @@ HTML = r"""<!doctype html>
       display: inline-flex; align-items: center; gap: 8px;
     }
     .brand { display: inline-flex; align-items: center; flex-shrink: 0; }
-    .brand img { height: 124px; width: auto; display: block; }
+    .brand img { height: 56px; width: auto; display: block; }
     /* DEV badge — visible only on the dev panel (PROFILE == 'dev'). Sits
        next to the Phosphene wordmark so it's the first thing you notice
        when comparing dev vs production tabs. */
@@ -19277,7 +19355,7 @@ HTML = r"""<!doctype html>
          (tight) on a wide viewport to ~580px+ on narrower viewports.
          Lower bound of 420px so the composer doesn't get squeezed. */
       flex: 1 1 auto; display: grid;
-      grid-template-columns: minmax(420px, 1fr) minmax(0, calc((100vh - 220px) * 16 / 9));
+      grid-template-columns: minmax(280px, 1fr) minmax(0, calc((100vh - 220px) * 16 / 9));
       gap: 14px; padding: 14px; min-height: 0;
     }
     .form-pane, .stage-pane {
@@ -19781,7 +19859,7 @@ HTML = r"""<!doctype html>
     .ideo-head-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     .ideo-head-title { font-size: 13px; font-weight: 600; color: var(--text); }
     .ideo-head-sub { font-size: 11px; color: var(--muted); }
-    .ideo-mode-toggle { margin: 0; min-width: 220px; flex: 0 0 auto; }
+    .ideo-mode-toggle { margin: 0; min-width: 0; flex: 0 0 auto; }
     .ideo-prompt-label {
       display: block; font-size: 11px; font-weight: 600; letter-spacing: .02em;
       color: var(--muted); text-transform: uppercase; margin: 0 0 6px 2px;
@@ -26411,16 +26489,33 @@ HTML = r"""<!doctype html>
             </div>
             <div class="quality-strip pill-group" id="h3LengthGroup"></div>
           </div>
-          <!-- H3 自定义尺寸(覆盖档位预设) — 32倍数,上限1344×768 -->
-          <div id="h3CustomDims" data-h3-only hidden style="display:none;align-items:center;gap:8px;margin:4px 0 6px 0;padding:0 2px;">
-            <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600;flex:0 0 auto;">自定义尺寸</span>
-            <div style="display:flex;gap:6px;align-items:center;">
-              <input type="number" id="h3CustomW" min="32" max="1344" step="32" placeholder="宽" style="width:70px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
-              <span style="color:var(--muted);">×</span>
-              <input type="number" id="h3CustomH" min="32" max="768" step="32" placeholder="高" style="width:70px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
-              <button type="button" id="h3CustomApply" style="padding:4px 10px;font-size:11px;border-radius:6px;cursor:pointer;white-space:nowrap;">应用</button>
-              <span id="h3CustomHint" style="font-size:10px;color:var(--muted);"></span>
+          <!-- H3 尺寸控制:兆像素系数(推荐) + 高级自定义宽高 -->
+          <div id="h3CustomDims" data-h3-only hidden style="display:none;flex-direction:column;gap:6px;margin:4px 0 6px 0;padding:0 2px;">
+            <!-- 兆像素系数行(ComfyUI 风格,推荐用法) -->
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="font-size:11px;color:var(--accent-bright,#5eeaff);text-transform:uppercase;letter-spacing:.4px;font-weight:700;flex:0 0 auto;">📐 画质系数</span>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;" id="h3MpChips">
+                <button type="button" class="mp-chip" data-mp="0.2" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.2</button>
+                <button type="button" class="mp-chip" data-mp="0.3" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.3</button>
+                <button type="button" class="mp-chip" data-mp="0.4" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.4 ⭐</button>
+                <button type="button" class="mp-chip" data-mp="0.6" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.6</button>
+                <button type="button" class="mp-chip" data-mp="0.8" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.8</button>
+                <button type="button" class="mp-chip" data-mp="0.97" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">最高</button>
+              </div>
+              <input type="number" id="h3MpInput" min="0.1" max="0.97" step="0.05" value="0.4" style="width:60px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
+              <span id="h3MpHint" style="font-size:11px;color:var(--muted);">= 864×480(16:9)</span>
             </div>
+            <!-- 高级:手动宽高(折叠) -->
+            <details style="font-size:11px;color:var(--muted);">
+              <summary style="cursor:pointer;padding:2px 0;">高级:手动指定宽×高</summary>
+              <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+                <input type="number" id="h3CustomW" min="32" max="1344" step="32" placeholder="宽" style="width:70px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
+                <span style="color:var(--muted);">×</span>
+                <input type="number" id="h3CustomH" min="32" max="768" step="32" placeholder="高" style="width:70px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
+                <button type="button" id="h3CustomApply" style="padding:4px 10px;font-size:11px;border-radius:6px;cursor:pointer;white-space:nowrap;">应用</button>
+                <span id="h3CustomHint" style="font-size:10px;color:var(--muted);"></span>
+              </div>
+            </details>
           </div>
           <!-- Honest artefact notes for the selected combination. Rendered from
                the cell's `notes` list (server-side), so a Draft 10 s clip is
@@ -33846,7 +33941,22 @@ document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.onclic
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
 // H3 自定义尺寸应用按钮
-(function(){ const btn=document.getElementById('h3CustomApply'); if(btn) btn.onclick = h3ApplyCustomDims; })();
+(function(){
+  const btn=document.getElementById('h3CustomApply'); if(btn) btn.onclick = h3ApplyCustomDims;
+  // 兆像素 chip 点击
+  document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
+    c.onclick = () => {
+      const mp = parseFloat(c.dataset.mp);
+      const inp = document.getElementById('h3MpInput'); if (inp) inp.value = mp;
+      h3ApplyMp(mp);
+    };
+  });
+  // 兆像素输入框实时计算
+  const mpInp = document.getElementById('h3MpInput');
+  if (mpInp) mpInp.oninput = () => h3ApplyMp(parseFloat(mpInp.value) || 0.4);
+  // 初始化默认 0.4
+  setTimeout(() => h3ApplyMp(0.4), 100);
+})();
 
 // ============================================================================
 // Engine registry — the header switcher and every gate behind it
@@ -34794,6 +34904,47 @@ function setH3Tier(key) {
   // Finish, setQuality's H3 re-assertion), and a restore that lands on a shape
   // this install can't serve must degrade, not leave the form armed with it.
   _h3ApplyShape(tier.quality, tier.length, { fallback: true });
+}
+
+// ============================================================================
+// H3 兆像素系数 → 自动算尺寸(ComfyUI 风格:16:9 + 32倍数 + ≤1.03MP 上限)
+// ============================================================================
+// 输入 mp(0.2~0.97),按 16:9 算出宽高,对齐 32 倍数,clamp 到模型上限。
+function h3MpToDims(mp) {
+  const MAX_PIXELS = 1344 * 768;  // 模型上限 ~1.03MP
+  let targetPixels = Math.max(0.05, Math.min(mp, 0.97)) * 1000000;
+  if (targetPixels > MAX_PIXELS) targetPixels = MAX_PIXELS;
+  // 16:9 → w = sqrt(pixels * 16/9), h = sqrt(pixels * 9/16)
+  let w = Math.round(Math.sqrt(targetPixels * 16 / 9));
+  let h = Math.round(Math.sqrt(targetPixels * 9 / 16));
+  // 对齐 32 倍数
+  w = Math.max(32, Math.round(w / 32) * 32);
+  h = Math.max(32, Math.round(h / 32) * 32);
+  // clamp 上限
+  if (w > 1344) w = 1344;
+  if (h > 768) h = 768;
+  return { w, h };
+}
+
+function h3ApplyMp(mp) {
+  const { w, h } = h3MpToDims(mp);
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('width', w);
+  set('height', h);
+  const hint = document.getElementById('h3MpHint');
+  if (hint) hint.textContent = '= ' + w + '×' + h + ' (16:9 · ' + (w*h/1e6).toFixed(2) + 'MP)';
+  // 同步手动宽高框
+  const wEl = document.getElementById('h3CustomW');
+  const hEl = document.getElementById('h3CustomH');
+  if (wEl) wEl.value = w;
+  if (hEl) hEl.value = h;
+  // 高亮选中的 chip
+  document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
+    const active = Math.abs(parseFloat(c.dataset.mp) - mp) < 0.001;
+    c.style.borderColor = active ? 'var(--accent,#5a7cff)' : 'var(--border,#444)';
+    c.style.background = active ? 'var(--accent,#5a7cff)' : 'var(--bg-2,#1c1c1e)';
+    c.style.color = active ? '#fff' : 'inherit';
+  });
 }
 
 // ============================================================================

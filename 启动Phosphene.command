@@ -3,7 +3,7 @@
 # 双击此文件即可启动,自动打开浏览器
 # 用法: 双击 或 bash 启动Phosphene.command
 
-DIR=~/pinokio/api/phosphene.git
+DIR=~/Phosphene
 PORT=8198
 URL="http://127.0.0.1:${PORT}"
 

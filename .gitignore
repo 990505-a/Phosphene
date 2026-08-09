@@ -99,3 +99,6 @@ cache/
 logs/
 *.pyc
 __pycache__/
+
+# 本地备份文件,不提交
+*.py.bak.*
