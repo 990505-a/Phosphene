@@ -18505,7 +18505,15 @@ def _responsive_css() -> str:
   /* 按钮可换行 */
   .pill-group { flex-wrap: wrap !important; gap: 6px !important; }
   /* header 允许换行,按钮不挤出屏幕 */
-  body > header { flex-wrap: wrap !important; padding: 8px 12px !important; gap: 8px !important; }
+  body > header {
+    flex-wrap: wrap !important;
+    height: auto !important;
+    min-height: 56px !important;
+    padding: 8px 12px !important;
+    gap: 8px !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+  }
   /* 模态弹窗适应 */
   .models-modal, .settings-modal { width: 95vw !important; max-width: 95vw !important; }
   .models-card { max-height: 90vh !important; overflow-y: auto !important; }
