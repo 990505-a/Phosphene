@@ -38599,14 +38599,6 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     fd.set('character_id', '');      // character LoRAs are an LTX construct
     fd.set('loras', '');             // ditto — the H3 runner stacks nothing
     fd.set('no_voice', '');          // only ever meant "skip the character's voice LoRA"
-    // 自定义尺寸控件(比例+系数):从 localStorage 读用户选择,强制覆盖
-    const _cr = localStorage.getItem('h3_custom_ratio') || '169';
-    const _cm = parseFloat(localStorage.getItem('h3_custom_mp') || '0.4');
-    if (typeof h3CalcDims === 'function') {
-      const _cd = h3CalcDims(_cr, _cm);
-      fd.set('width', String(_cd.w));
-      fd.set('height', String(_cd.h));
-    }
   }
 
   // Disable the Generate button while we POST to /queue/add so a fast
@@ -38789,10 +38781,17 @@ document.getElementById('genForm').addEventListener('submit', async e => {
         fd.set('h3_tier', String(_t.key));
         fd.set('h3_quality', String(_t.quality));
         fd.set('h3_length', String(_t.length));
-        fd.set('width', String(_t.width));
-        fd.set('height', String(_t.height));
         fd.set('frames', String(_t.frames));
         fd.set('steps', String(_t.steps));
+      }
+      // 自定义尺寸控件(比例+系数):最后关口,用 localStorage 强制覆盖 width/height
+      // 必须在 tier cell 覆盖之后执行,否则会被冲掉
+      const _fcr = localStorage.getItem('h3_custom_ratio') || '169';
+      const _fcm = parseFloat(localStorage.getItem('h3_custom_mp') || '0.4');
+      if (typeof h3CalcDims === 'function') {
+        const _fcd = h3CalcDims(_fcr, _fcm);
+        fd.set('width', String(_fcd.w));
+        fd.set('height', String(_fcd.h));
       }
     }
     await api('/queue/add','POST',fd);
