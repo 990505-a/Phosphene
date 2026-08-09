@@ -26489,21 +26489,29 @@ HTML = r"""<!doctype html>
             </div>
             <div class="quality-strip pill-group" id="h3LengthGroup"></div>
           </div>
-          <!-- H3 尺寸控制:兆像素系数(推荐) + 高级自定义宽高 -->
-          <div id="h3CustomDims" data-h3-only hidden style="display:none;flex-direction:column;gap:6px;margin:4px 0 6px 0;padding:0 2px;">
-            <!-- 兆像素系数行(ComfyUI 风格,推荐用法) -->
+          <!-- H3 尺寸控制:第1行选比例,第2行选系数 -->
+          <div id="h3CustomDims" data-h3-only hidden style="display:none;flex-direction:column;gap:8px;margin:6px 0 8px 0;padding:8px 10px;background:var(--bg-2,#16161c);border:1px solid var(--border,#333);border-radius:10px;">
+            <!-- 第1行:画面比例 -->
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-              <span style="font-size:11px;color:var(--accent-bright,#5eeaff);text-transform:uppercase;letter-spacing:.4px;font-weight:700;flex:0 0 auto;">📐 画质系数</span>
-              <div style="display:flex;gap:4px;flex-wrap:wrap;" id="h3MpChips">
-                <button type="button" class="mp-chip" data-mp="0.2" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.2</button>
-                <button type="button" class="mp-chip" data-mp="0.3" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.3</button>
-                <button type="button" class="mp-chip" data-mp="0.4" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.4 ⭐</button>
-                <button type="button" class="mp-chip" data-mp="0.6" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.6</button>
-                <button type="button" class="mp-chip" data-mp="0.8" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.8</button>
-                <button type="button" class="mp-chip" data-mp="0.97" style="padding:5px 11px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">最高</button>
+              <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;flex:0 0 auto;width:48px;">比例</span>
+              <div style="display:flex;gap:5px;flex-wrap:wrap;" id="h3RatioChips">
+                <button type="button" class="ratio-chip" data-ratio="169" style="padding:6px 14px;font-size:13px;border-radius:9px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;">🖥️ 16:9 横屏</button>
+                <button type="button" class="ratio-chip" data-ratio="916" style="padding:6px 14px;font-size:13px;border-radius:9px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">📱 9:16 竖屏</button>
+                <button type="button" class="ratio-chip" data-ratio="11" style="padding:6px 14px;font-size:13px;border-radius:9px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">⬛ 1:1 方形</button>
               </div>
-              <input type="number" id="h3MpInput" min="0.1" max="0.97" step="0.05" value="0.4" style="width:60px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
-              <span id="h3MpHint" style="font-size:11px;color:var(--muted);">= 864×480(16:9)</span>
+            </div>
+            <!-- 第2行:清晰度系数 -->
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;flex:0 0 auto;width:48px;">清晰度</span>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;" id="h3MpChips">
+                <button type="button" class="mp-chip" data-mp="0.2" style="padding:5px 12px;font-size:13px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.2</button>
+                <button type="button" class="mp-chip" data-mp="0.4" style="padding:5px 12px;font-size:13px;border-radius:8px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;">0.4</button>
+                <button type="button" class="mp-chip" data-mp="0.6" style="padding:5px 12px;font-size:13px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.6</button>
+                <button type="button" class="mp-chip" data-mp="0.8" style="padding:5px 12px;font-size:13px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">0.8</button>
+                <button type="button" class="mp-chip" data-mp="0.97" style="padding:5px 12px;font-size:13px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;">最高</button>
+              </div>
+              <!-- 结果显示 -->
+              <span id="h3MpHint" style="font-size:13px;color:var(--accent-bright,#5eeaff);font-weight:600;margin-left:auto;">→ 832×480</span>
             </div>
             <!-- 高级:手动宽高(折叠) -->
             <details style="font-size:11px;color:var(--muted);">
@@ -33943,19 +33951,16 @@ document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick =
 // H3 自定义尺寸应用按钮
 (function(){
   const btn=document.getElementById('h3CustomApply'); if(btn) btn.onclick = h3ApplyCustomDims;
-  // 兆像素 chip 点击
-  document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
-    c.onclick = () => {
-      const mp = parseFloat(c.dataset.mp);
-      const inp = document.getElementById('h3MpInput'); if (inp) inp.value = mp;
-      h3ApplyMp(mp);
-    };
+  // 比例 chip 点击
+  document.querySelectorAll('#h3RatioChips .ratio-chip').forEach(c => {
+    c.onclick = () => h3SetRatio(c.dataset.ratio);
   });
-  // 兆像素输入框实时计算
-  const mpInp = document.getElementById('h3MpInput');
-  if (mpInp) mpInp.oninput = () => h3ApplyMp(parseFloat(mpInp.value) || 0.4);
-  // 初始化默认 0.4
-  setTimeout(() => h3ApplyMp(0.4), 100);
+  // 系数 chip 点击
+  document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
+    c.onclick = () => h3SetMp(parseFloat(c.dataset.mp));
+  });
+  // 初始化默认:16:9 + 0.4
+  setTimeout(() => { h3SetRatio('169'); h3SetMp(0.4); }, 100);
 })();
 
 // ============================================================================
@@ -34907,44 +34912,70 @@ function setH3Tier(key) {
 }
 
 // ============================================================================
-// H3 兆像素系数 → 自动算尺寸(ComfyUI 风格:16:9 + 32倍数 + ≤1.03MP 上限)
+// H3 尺寸计算:比例 + 系数 → 自动算尺寸(32倍数 + ≤1.03MP 上限)
 // ============================================================================
-// 输入 mp(0.2~0.97),按 16:9 算出宽高,对齐 32 倍数,clamp 到模型上限。
-function h3MpToDims(mp) {
-  const MAX_PIXELS = 1344 * 768;  // 模型上限 ~1.03MP
+// ratio: '169'(16:9) / '916'(9:16) / '11'(1:1)
+// mp: 0.2 ~ 0.97
+let h3CurrentRatio = '169';
+let h3CurrentMp = 0.4;
+
+function h3CalcDims(ratio, mp) {
+  const MAX_PIXELS = 1344 * 768;
   let targetPixels = Math.max(0.05, Math.min(mp, 0.97)) * 1000000;
   if (targetPixels > MAX_PIXELS) targetPixels = MAX_PIXELS;
-  // 16:9 → w = sqrt(pixels * 16/9), h = sqrt(pixels * 9/16)
-  let w = Math.round(Math.sqrt(targetPixels * 16 / 9));
-  let h = Math.round(Math.sqrt(targetPixels * 9 / 16));
-  // 对齐 32 倍数
+  let rw, rh;
+  if (ratio === '916')      { rw = 9;  rh = 16; }
+  else if (ratio === '11')  { rw = 1;  rh = 1;  }
+  else                       { rw = 16; rh = 9;  }
+  let w = Math.round(Math.sqrt(targetPixels * rw / rh));
+  let h = Math.round(Math.sqrt(targetPixels * rh / rw));
   w = Math.max(32, Math.round(w / 32) * 32);
   h = Math.max(32, Math.round(h / 32) * 32);
-  // clamp 上限
-  if (w > 1344) w = 1344;
-  if (h > 768) h = 768;
+  // clamp:宽≤1344,高≤768(模型上限),但竖屏高可到1344
+  const maxW = 1344, maxH = 1344;
+  if (w > maxW) w = maxW;
+  if (h > maxH) h = maxH;
   return { w, h };
 }
 
-function h3ApplyMp(mp) {
-  const { w, h } = h3MpToDims(mp);
+function h3ApplyDims() {
+  const { w, h } = h3CalcDims(h3CurrentRatio, h3CurrentMp);
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
   set('width', w);
   set('height', h);
   const hint = document.getElementById('h3MpHint');
-  if (hint) hint.textContent = '= ' + w + '×' + h + ' (16:9 · ' + (w*h/1e6).toFixed(2) + 'MP)';
+  if (hint) hint.textContent = '→ ' + w + '×' + h;
   // 同步手动宽高框
   const wEl = document.getElementById('h3CustomW');
   const hEl = document.getElementById('h3CustomH');
   if (wEl) wEl.value = w;
   if (hEl) hEl.value = h;
-  // 高亮选中的 chip
-  document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
-    const active = Math.abs(parseFloat(c.dataset.mp) - mp) < 0.001;
+}
+
+function h3SetRatio(ratio) {
+  h3CurrentRatio = ratio;
+  // 高亮比例 chip
+  document.querySelectorAll('#h3RatioChips .ratio-chip').forEach(c => {
+    const active = c.dataset.ratio === ratio;
+    c.style.borderWidth = active ? '2px' : '1px';
     c.style.borderColor = active ? 'var(--accent,#5a7cff)' : 'var(--border,#444)';
     c.style.background = active ? 'var(--accent,#5a7cff)' : 'var(--bg-2,#1c1c1e)';
     c.style.color = active ? '#fff' : 'inherit';
   });
+  h3ApplyDims();
+}
+
+function h3SetMp(mp) {
+  h3CurrentMp = mp;
+  // 高亮系数 chip
+  document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
+    const active = Math.abs(parseFloat(c.dataset.mp) - mp) < 0.001;
+    c.style.borderWidth = active ? '2px' : '1px';
+    c.style.borderColor = active ? 'var(--accent,#5a7cff)' : 'var(--border,#444)';
+    c.style.background = active ? 'var(--accent,#5a7cff)' : 'var(--bg-2,#1c1c1e)';
+    c.style.color = active ? '#fff' : 'inherit';
+  });
+  h3ApplyDims();
 }
 
 // ============================================================================
