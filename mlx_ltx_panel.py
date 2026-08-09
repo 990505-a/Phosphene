@@ -26482,9 +26482,10 @@ HTML = r"""<!doctype html>
                hides it by id. It is now a wrapper around the two strips rather
                than a strip itself. -->
           <div class="h3-axes" id="h3TierGroup" hidden>
-            <div class="quality-strip pill-group" id="h3QualityGroup"></div>
+            <!-- 画质档位栏已隐藏:改用下方的「比例+系数」控件控制尺寸 -->
+            <div class="quality-strip pill-group" id="h3QualityGroup" style="display:none !important;"></div>
             <div class="qs-label h3-axis-label">
-              <span class="qs-name">Length</span>
+              <span class="qs-name">时长</span>
               <span class="qs-meta" id="h3LengthMeta"></span>
             </div>
             <div class="quality-strip pill-group" id="h3LengthGroup"></div>
