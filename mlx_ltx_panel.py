@@ -9818,10 +9818,10 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     # runner that snaps frames to the 17n+5 grid.
     if _engine == "h3":
         _tier_cfg = H3_TIERS[_h3_tier]
-        # 自定义尺寸(比例+系数控件):如果前端传了自定义 width/height,优先用它
-        # 否则回退到 tier 配置
-        _custom_w = int(job["params"].get("width") or 0)
-        _custom_h = int(job["params"].get("height") or 0)
+        # 自定义尺寸(比例+系数控件):从表单读 width/height,
+        # 如果有效(>=256x144)优先用它,否则回退 tier 配置
+        _custom_w = int(f("width", "0") or 0)
+        _custom_h = int(f("height", "0") or 0)
         if _custom_w >= 256 and _custom_h >= 144:
             job["params"]["width"] = _custom_w
             job["params"]["height"] = _custom_h
