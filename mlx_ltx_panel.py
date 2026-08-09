@@ -34728,8 +34728,15 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
   // Mirror the cell geometry into the shared hidden fields so the queue card,
   // the "Generate" estimate and Load Params all read the truth. make_job
   // re-stamps these server-side too — a stale tab must never win.
-  set('width', cell.width);
-  set('height', cell.height);
+  // 但如果自定义尺寸控件(比例+系数)激活,用自定义算出的值覆盖 tier 值
+  if (typeof h3CalcDims === 'function' && typeof h3CurrentRatio !== 'undefined') {
+    const _cd = h3CalcDims(h3CurrentRatio, h3CurrentMp);
+    set('width', _cd.w);
+    set('height', _cd.h);
+  } else {
+    set('width', cell.width);
+    set('height', cell.height);
+  }
   set('frames', cell.frames);
   const s = document.getElementById('steps');
   if (s) {
