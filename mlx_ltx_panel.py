@@ -34650,8 +34650,10 @@ function renderH3Axes() {
   if (meta) {
     // 自定义尺寸控件激活时,显示控件算出的尺寸而非 tier 的 cell 尺寸
     let _w = cell ? cell.width : 0, _h = cell ? cell.height : 0;
-    if (typeof h3CalcDims === 'function' && typeof h3CurrentRatio !== 'undefined') {
-      const _cd = h3CalcDims(h3CurrentRatio, h3CurrentMp);
+    const _ar = document.querySelector('#h3RatioChips .ratio-chip[data-active="1"]');
+    const _am = document.querySelector('#h3MpChips .mp-chip[data-active="1"]');
+    if (_ar && _am && typeof h3CalcDims === 'function') {
+      const _cd = h3CalcDims(_ar.dataset.ratio, parseFloat(_am.dataset.mp));
       _w = _cd.w; _h = _cd.h;
     }
     meta.textContent = cell
@@ -34735,8 +34737,11 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
   // the "Generate" estimate and Load Params all read the truth. make_job
   // re-stamps these server-side too — a stale tab must never win.
   // 但如果自定义尺寸控件(比例+系数)激活,用自定义算出的值覆盖 tier 值
-  if (typeof h3CalcDims === 'function' && typeof h3CurrentRatio !== 'undefined') {
-    const _cd = h3CalcDims(h3CurrentRatio, h3CurrentMp);
+  // 直接从 DOM 读当前选中的 chip(data-active 标记),不依赖全局变量
+  const _ar = document.querySelector('#h3RatioChips .ratio-chip[data-active="1"]');
+  const _am = document.querySelector('#h3MpChips .mp-chip[data-active="1"]');
+  if (_ar && _am && typeof h3CalcDims === 'function') {
+    const _cd = h3CalcDims(_ar.dataset.ratio, parseFloat(_am.dataset.mp));
     set('width', _cd.w);
     set('height', _cd.h);
   } else {
@@ -35013,6 +35018,7 @@ function h3SetRatio(ratio) {
     c.style.borderColor = active ? 'var(--accent,#5a7cff)' : 'var(--border,#444)';
     c.style.background = active ? 'var(--accent,#5a7cff)' : 'var(--bg-2,#1c1c1e)';
     c.style.color = active ? '#fff' : 'inherit';
+    c.dataset.active = active ? '1' : '';
   });
   h3ApplyDims();
 }
@@ -35025,6 +35031,7 @@ function h3SetMp(mp) {
     c.style.borderColor = active ? 'var(--accent,#5a7cff)' : 'var(--border,#444)';
     c.style.background = active ? 'var(--accent,#5a7cff)' : 'var(--bg-2,#1c1c1e)';
     c.style.color = active ? '#fff' : 'inherit';
+    c.dataset.active = active ? '1' : '';
   });
   h3ApplyDims();
 }
