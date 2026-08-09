@@ -18529,10 +18529,10 @@ def _responsive_css() -> str:
   h1 { font-size: 1.3em !important; }
   h2 { font-size: 1.15em !important; }
   h3 { font-size: 1.05em !important; }
-  /* ★ header:允许独立横滚,设置按钮不再被裁掉 */
-  body > header { overflow-x: auto !important; overflow-y: hidden !important;
+  /* ★ header:换行+允许横滚,设置按钮不再被裁掉 */
+  body > header { overflow-x: auto !important; overflow-y: visible !important;
                   height: auto !important; min-height: 56px !important; padding: 8px 12px !important;
-                  flex-wrap: nowrap !important; -webkit-overflow-scrolling: touch; }
+                  flex-wrap: wrap !important; -webkit-overflow-scrolling: touch; }
   body > header .brand { flex-shrink: 0 !important; }
   body > header .spacer { flex: 0 0 auto !important; min-width: 8px !important; }
   #settingsBtn { flex-shrink: 0 !important; }
