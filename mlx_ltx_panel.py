@@ -38593,6 +38593,14 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     fd.set('character_id', '');      // character LoRAs are an LTX construct
     fd.set('loras', '');             // ditto — the H3 runner stacks nothing
     fd.set('no_voice', '');          // only ever meant "skip the character's voice LoRA"
+    // 自定义尺寸控件(比例+系数):从 DOM 读选中项,强制覆盖 width/height
+    const _ar = document.querySelector('#h3RatioChips .ratio-chip[data-active="1"]');
+    const _am = document.querySelector('#h3MpChips .mp-chip[data-active="1"]');
+    if (_ar && _am && typeof h3CalcDims === 'function') {
+      const _cd = h3CalcDims(_ar.dataset.ratio, parseFloat(_am.dataset.mp));
+      fd.set('width', String(_cd.w));
+      fd.set('height', String(_cd.h));
+    }
   }
 
   // Disable the Generate button while we POST to /queue/add so a fast
