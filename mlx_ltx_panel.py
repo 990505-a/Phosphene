@@ -36036,7 +36036,7 @@ async function pickerUploadFile(key, file) {
   }
   try {
     const fd = new FormData(); fd.append('image', file);
-    const r = await fetch('/upload', { method: 'POST', body: fd });
+    const r = await fetch('/upload', { method: 'POST', body: fd, credentials: 'same-origin' });
     const data = await r.json();
     if (!data.ok) throw new Error(data.error || 'upload failed');
     pickerSetImage(key, data.path);
@@ -36163,7 +36163,7 @@ async function ingredientUploadFile(file) {
   busy.textContent = `Uploading ${file.name}…`;
   try {
     const fd = new FormData(); fd.append('image', file);
-    const r = await fetch('/upload', { method: 'POST', body: fd });
+    const r = await fetch('/upload', { method: 'POST', body: fd, credentials: 'same-origin' });
     const data = await r.json();
     if (!data.ok) throw new Error(data.error || 'upload failed');
     ingredientAddPath(data.path);
