@@ -5312,6 +5312,25 @@ def _h3_qualities() -> dict[str, dict]:
                      "without.",
             "offered": True,
         },
+        # ===== 官方约束内的实用档位(32倍数 + ≤1.03MP) =====
+        "vertical_high": {
+            "key": "vertical_high", "label": "竖屏 9:16", "order": 4,
+            "width": 576, "height": 1024,
+            "blurb": "竖屏 9:16 · 576×1024。High 的竖屏版,适合手机短视频。",
+            "offered": True,
+        },
+        "vertical_native": {
+            "key": "vertical_native", "label": "竖屏最高", "order": 5,
+            "width": 768, "height": 1344,
+            "blurb": "竖屏 7:4 · 768×1344。Native 竖屏版,短边顶满 768,细节最多。",
+            "offered": True,
+        },
+        "square": {
+            "key": "square", "label": "方形 1:1", "order": 6,
+            "width": 960, "height": 960,
+            "blurb": "正方形 1:1 · 960×960。适合社交媒体、头像、Instagram。",
+            "offered": True,
+        },
         # Off by default, behind an env flag, for the same reason the dense pass
         # is: reachable for the A/B that would justify it, not put in front of
         # users until that A/B exists.
@@ -18507,6 +18526,260 @@ def _resolve_cap_tier() -> str:
     return "q8" if SYSTEM_CAPS.get("allows_q8") else "q4"
 
 
+def _i18n_script() -> str:
+    """Injects a browser-side language switcher (EN<->ZH) for core UI labels.
+    Activated by the dropdown in Settings; choice persists in localStorage."""
+    return r"""
+<script>
+// ===== Phosphene i18n (EN <-> ZH) =====
+// Browser-side dynamic translation. Translates only the matched textContent of
+// core UI elements (buttons/labels/spans). Leaves attributes, classes, variable
+// names, long help text, and parameter values untouched. Toggle via Settings.
+(function(){
+  const ZH = {
+    "Generate":"生成","Generating":"生成中","Generation":"生成","Generation info":"生成信息","Stop":"停止","Stop Comfy":"停止Comfy","Settings":"设置","Models":"模型",
+    "Quality":"画质","Engine":"引擎","Duration":"时长","Prompt":"提示词",
+    "Draft":"草稿","Balanced":"均衡","Standard":"标准","Native":"原始","Quick":"快速","Long":"长片",
+    "Now":"当前","Queue":"队列","Queue all":"全部排队","Queue empty":"队列空","Queue ID":"队列ID","Recent":"历史","Logs":"日志","Pause queue":"暂停队列",
+    "Characters":"角色","Character":"角色","Manage characters":"管理角色","No characters yet":"还没有角色","Audio":"音频","Image":"图像","Images":"图像","Text":"文本","Video":"视频","Videos":"视频",
+    "Clear":"清空","Clear all":"全部清空","Close":"关闭","Cancel":"取消","Apply":"应用","Apply edits":"应用编辑",
+    "LoRAs":"风格模型","LoRAs used":"使用的风格模型","Upscale":"放大","Scale":"缩放","Steps":"步数","Seed":"种子","Resolution":"分辨率","Frame":"帧","Frames":"帧","Frame count":"帧数","Output":"输出","Input":"输入","Outputs":"输出",
+    "Gallery":"画廊","Train Character":"训练角色","Train tab":"训练标签","Train voice LoRA":"训练语音风格","Trained":"已训练",
+    "Reference image":"参考图","Reference images":"参考图","Reference audio":"参考音频","Source video":"源视频","Source video to colorize":"要上色的源视频","Control video":"控制视频","Use reference":"使用参考",
+    "Direction":"方向","After":"之后","Before":"之前","Segment timing":"片段时间","Timing":"时间",
+    "Enhance":"增强","Negative":"负面","Avoid":"避免","Avoid +":"避免 +","No music":"无音乐","No voice":"无人声","HDR":"HDR",
+    "New":"新建","Edit":"编辑","Delete":"删除","Save":"保存","Save & test":"保存并测试","Load":"加载","Load more":"加载更多","Download":"下载","Download required":"需要下载","Upload":"上传","Installed":"已安装","Install":"安装",
+    "Add":"添加","Add color":"添加颜色","Remove":"移除","Reset":"重置","Refresh":"刷新","Open":"打开","Open GitHub issue":"在GitHub反馈","Undo":"撤销","Dismiss":"忽略",
+    "Start":"开始","Pause":"暂停","Resume":"继续","Retry":"重试","Yes":"是","No":"否","All":"全部","None":"无","Off":"关","On":"开","OFF":"关","ON":"开",
+    "Loading":"加载中","Rendering":"渲染中","Render":"渲染","Queued":"排队中","Completed":"已完成","Failed":"失败","Started":"已开始","Idle":"空闲","No job running":"没有运行中的任务","No outputs yet":"还没有输出",
+    "Keyframe":"关键帧","Keyframes":"关键帧","Keyframe mode":"关键帧模式","FFLF":"FFLF","Multi-Keyframe":"多关键帧","Extend":"延长","Remix":"混音","Ingredients":"素材","Control":"控制","Colorize":"上色","Multi-ref":"多参考","Multi-subject tip:":"多主体提示:",
+    "Version":"版本","Advanced":"高级","General":"常规","About":"关于","Export":"导出","Import":"导入","Preview":"预览","Copy":"复制","Result":"结果",
+    "Aspect":"宽高比","Orientation":"方向","Width":"宽度","Height":"高度","Length":"长度","Mode":"模式","Model":"模型","Model files":"模型文件","Format":"格式","Output format":"输出格式","Output codec":"输出编码","Policy":"策略","Memory":"内存","Memory / speed":"内存/速度","Speed":"速度","Fast":"快速","Medium":"中等","High":"高","Custom":"自定义","Customize":"自定义",
+    "Params":"参数","Layout":"布局","Style":"风格","Composition":"构图","Mood":"氛围","Lighting":"光线","Lighting variety":"光线多样性","Background variety":"背景多样性","Color":"颜色","Color grading":"调色","Body":"主体","Lens character":"镜头角色","Design":"设计","Script":"脚本","Headline":"标题","Subhead":"副标题","Region":"地区","Rank":"排名",
+    "Anonymous usage analytics":"匿名使用分析","Analytics":"分析","Accel metrics":"加速指标","API tokens":"API令牌","CivitAI API key":"CivitAI API密钥","CivitAI requires an API key":"CivitAI需要API密钥","Hugging Face token":"Hugging Face令牌","NSFW":"NSFW","Show NSFW":"显示NSFW","Spicy mode":"进阶模式","Photographic":"摄影风格","Serif":"衬线","Small caps":"小型大写","Snap":"吸附","Align":"对齐","Boost":"增强","Chained":"链式","Exact":"精确","Expand":"展开","Hide other modes":"隐藏其他模式","Simple":"简单","Smooth":"平滑","Animate":"动画",
+    "Audio file path":"音频文件路径","Audio steps":"音频步数","Audio conditioning strength":"音频条件强度","Frame count":"帧数","Frames":"帧","Learning rate":"学习率","Caption format":"字幕格式","Caption rule":"字幕规则","Caption strategy":"字幕策略","Image count":"图像数量","Image aspect ratio":"图像宽高比","Peak RAM":"峰值内存","Estimated wall time":"预计耗时","Elapsed":"已用时","Hardware tier":"硬件档位","CRF":"CRF","Center crop":"中心裁剪","Preserve aspect":"保持比例","Letterbox":"加黑边","Primary":"主要","Secondary":"次要",
+    "How to install":"如何安装","How to train a character well":"如何训练好一个角色","Read instructions on CivitAI":"在CivitAI阅读说明","Browse CivitAI":"浏览CivitAI","Trigger token first":"触发词优先","One line per window":"每个窗口一行","Per-window prompts":"每窗口提示词","Window prompts":"窗口提示词","Consistency beats variety":"一致性胜过多样性","Variety beats quantity":"多样性胜过数量","Identity strength":"一致性强度","Strength is a trade-off:":"强度是权衡:","Use your trained characters":"使用你训练的角色","No characters yet":"还没有角色","Trained LoRAs land in":"训练好的风格模型保存到","Each chunk between":"每个片段之间","Pick":"选择","Pick a clip whose":"选择一个片段","Describe":"描述","Describe the":"描述","Describe what":"描述什么","Drop":"拖放","Drop a":"拖放一个","Drop the":"拖放","Action / shot to generate":"要生成的动作/镜头","Scanning":"扫描","Smoke":"烟雾","Phosphene offline":"Phosphene离线","Report a bug":"报告问题","Finish":"完成","Turbo":"加速","Sharp":"锐化","Auto":"自动",
+    "Show all":"显示全部","Recommended":"推荐","Photos":"照片","Raw caption JSON":"原始字幕JSON",
+    "Loading pipeline":"加载管线中","Loaded":"已加载","Saved":"已保存","Saved.":"已保存。","Working":"处理中",
+    "Paused":"已暂停","Status":"状态","Submitted. Watch Now / Recent.":"已提交。看 当前/历史。",
+    "Copied!":"已复制!","Path copied.":"路径已复制。","Applied to canvas.":"已应用到画布。",
+    "Phosphene reconnected":"Phosphene已重连","Click to start.":"点击开始。","Click again to confirm":"再点一次确认","Click to add to prompt":"点击加入提示词",
+    "Click to see what this Mac can do":"点击查看这台Mac的能力","Try again":"重试","Dismiss this failure":"忽略此失败",
+    "Upload failed: ":"上传失败: ","Upload error: ":"上传错误: ","Image submit failed: ":"图像提交失败: ",
+    "Voice upload failed: ":"语音上传失败: ","Audio upload failed: ":"音频上传失败: ",
+    "Bundle upload failed: ":"打包上传失败: ","Bundle error: ":"打包错误: ","Batch error: ":"批处理错误: ",
+    "Copy failed: ":"复制失败: ","Delete failed: ":"删除失败: ","Delete error: ":"删除错误: ",
+    "Rename failed: ":"重命名失败: ","Repair failed: ":"修复失败: ","Retry failed: ":"重试失败: ","Retry error: ":"重试错误: ",
+    "Enhance failed: ":"增强失败: ","Enhance request failed: ":"增强请求失败: ",
+    "Download failed: ":"下载失败: ","Download failed to start: ":"下载失败,未启动: ","Download request failed: ":"下载请求失败: ",
+    "Network error: ":"网络错误: ","Submit failed: ":"提交失败: ","Enqueue failed: ":"入队失败: ","Failed to enqueue: ":"入队失败: ",
+    "Failed: ":"失败: ","Job failed.":"任务失败。","Last job failed":"上次任务失败",
+    "Could not start: ":"无法启动: ","Could not load settings.":"无法加载设置。","Could not save key: ":"无法保存密钥: ",
+    "Could not clear: ":"无法清空: ","Could not change analytics: ":"无法更改分析: ","Could not change Spicy mode: ":"无法更改进阶模式: ",
+    "Open folder failed: ":"打开文件夹失败: ","Open folder error: ":"打开文件夹错误: ",
+    "Caption upload error: ":"字幕上传错误: ","Caption upload failed: ":"字幕上传失败: ",
+    "No history yet":"还没有历史","No log yet.":"还没有日志。","No outputs in this view yet.":"此视图还没有输出。",
+    "No video outputs yet.":"还没有视频输出。","No photo outputs yet.":"还没有图像输出。",
+    "No video renders yet":"还没有视频渲染","No photo renders yet":"还没有图像渲染",
+    "No LoRAs available.":"没有可用的风格模型。","No image LoRAs in your library.":"库里没有图像风格模型。",
+    "No video LoRAs in your library.":"库里没有视频风格模型。","No image LoRAs match":"没有匹配的图像风格模型",
+    "No trained LoRAs yet. Start your first run above.":"还没有训练好的风格模型。在上面开始第一次训练。",
+    "Hidden outputs":"已隐藏的输出","Hide this output from the gallery":"在画廊中隐藏此输出",
+    "Base models needed before you can render":"渲染前需要基础模型","Model files are in the wrong place":"模型文件位置错误",
+    "Model files look incomplete / corrupt":"模型文件不完整/损坏","Not available on this Mac":"此Mac不可用",
+    "Not available on this install.":"此安装不可用。","Needs more memory than this Mac has":"需要比此Mac更多的内存",
+    "Helper exited unexpectedly.":"助手意外退出。","Re-cloning it takes about a minute.":"重新克隆约需一分钟。",
+    "Weights are cached locally":"权重已本地缓存","Gemma text encoder":"Gemma文本编码器","VAE decode + audio mux":"VAE解码+音频合成",
+    "Audio file is required.":"需要音频文件。","Prompt is required.":"需要提示词。",
+    "Bundle must be a .zip file.":"必须是.zip文件。","Drop at least one image first.":"先至少拖放一张图。",
+    "Name cannot be empty.":"名称不能为空。","Trigger word required.":"需要触发词。",
+    "Set a trigger word first.":"先设置触发词。","Type a prompt before enhancing it.":"增强前先输入提示词。",
+    "Pick an output first.":"先选择一个输出。","Generate without the LoRA anyway?":"仍不使用风格模型生成?",
+    "View / download model status":"查看/下载模型状态","Turbo download: ":"加速下载: ",
+    "Download the .safetensors file":"下载.safetensors文件","Open on CivitAI":"在CivitAI打开",
+    "Browse CivitAI for image LoRAs":"在CivitAI浏览图像风格模型","Filter LoRAs… (name or trigger word)":"筛选风格模型…(名称或触发词)",
+    "Search by name, style, creator…":"按名称、风格、作者搜索…","SDXL LoRAs":"SDXL风格模型",
+    "Qwen-Image":"Qwen-图像","Qwen-Image / Qwen-Image-Edit LoRAs":"Qwen-图像/Qwen-图像编辑风格模型",
+    "LTX-Video":"LTX-视频","HiDream":"HiDream",
+    "Delete from disk":"从硬盘删除","Delete this box":"删除此框","Delete this file from disk":"从硬盘删除此文件",
+    "Remove from active set":"从活动集移除","Remove palette color ":"移除调色板颜色 ","Remove voice clip":"移除语音片段",
+    "Reveal the outputs folder in Finder":"在访达中显示输出文件夹","Show generation info":"显示生成信息",
+    "Parse the JSON above back into the canvas":"将上面的JSON解析回画布","Edit canvas":"编辑画布",
+    "Load an example layout":"加载示例布局","Paste many prompts at once and queue them":"一次粘贴多个提示词并排队",
+    "Use this clip as the source for an Extend job":"用此片段作为延长任务的源","Extend an existing clip":"延长现有片段",
+    "Re-submit this job with the same params":"用相同参数重新提交此任务","Queue this training job.":"将此训练任务排队。",
+    "Use Gemma to rewrite your prompt":"用Gemma重写提示词","Suggest a fresh rare token":"建议新的稀有词",
+    "Save the pasted key and verify it with CivitAI":"保存粘贴的密钥并用CivitAI验证",
+    "Save the pasted token and verify it with Hugging Face":"保存粘贴的令牌并用Hugging Face验证",
+    "Disable":"禁用","Enable Spicy mode":"启用进阶模式","Pause / resume the queue":"暂停/恢复队列",
+    "Pause / resume the render queue":"暂停/恢复渲染队列",
+    "Anonymous usage analytics ON":"匿名使用分析 开","OFF - nothing is sent or logged.":"关 - 不发送或记录任何内容。",
+    "ON.":"开。","Your anonymous ID: ":"你的匿名ID: ","PostHog personal API key":"PostHog个人API密钥","PostHog project key":"PostHog项目密钥",
+    "Phosphene version":"Phosphene版本","Uses your saved Settings engine":"使用你保存的设置引擎",
+    "Train Character + Voice":"训练角色+语音","Train Style":"训练风格","Best results come from per-image captions in LTX ":"LTX中每张图单独字幕效果最好 ",
+    "Has voice LoRA + reference clip":"有语音风格模型+参考片段",
+    "Scene & background":"场景与背景","Object":"物体","Object region: ":"物体区域: ","Text box: ":"文本框: ",
+    "Intermediate motion anchor between Start and End.":"开始与结束之间的中间运动锚点。",
+    "Start/End":"开始/结束","Center":"中心","Left":"左","Right":"右","End":"结束",
+    "Snap boxes to thirds / center / other boxes":"将框吸附到三分线/中心/其他框",
+    "Custom color":"自定义颜色","Custom text color":"自定义文字颜色","Set color ":"设置颜色 ",
+    "Any size":"任意尺寸","Always smaller than Standard":"总是比标准小","High quality":"高质量","HQ speed":"HQ速度",
+    "Long clips":"长片","Multi-keyframe":"多关键帧","Caps":"大写","Text style":"文字样式",
+    "Clear all queued jobs":"清空所有排队任务","Re-download the corrupt ":"重新下载损坏的 ","Fix first: ":"先修复: ",
+    "GitHub issue opened in a new tab.":"GitHub问题已在新标签打开。",
+    "Required model not downloaded":"所需模型未下载","Train type":"训练类型","character identity, or a visual style":"角色身份,或视觉风格","face (+ voice) of one person":"一个人的人脸(+语音)",
+    "experimental":"实验性","cinematic look · color · lighting":"电影感·色彩·光线","Dataset 15-50 stills · drop your character into the box":"数据集 15-50张静态图 · 把你的角色拖到框里",
+    "Drop 15-50 images + optional matching .txt captions here, or click to browse":"拖放15-50张图片+可选的.txt字幕,或点击浏览","images":"张图","need at least 15 to train":"至少需要15张才能训练",
+    "Drop a ZIP of paired images + captions, or click":"拖放配对图片+字幕的ZIP,或点击","max 500 MB · stem-paired (image_001.png + image_001.txt)":"最大500MB · 同名配对",
+    "Caption format":"字幕格式","Auto-caption with Gemma 3":"用Gemma 3自动生成字幕","Trigger word":"触发词","a rare token the model will associate with this character":"模型用来关联此角色的稀有词","Suggest":"建议",
+    "Quality preset trade time for fidelity":"画质预设:用时间换保真度","~30 epochs · rank 8 · 512px":"~30轮 · rank 8 · 512px","~60 epochs · rank 16 · 576px":"~60轮 · rank 16 · 576px","~100 epochs · rank 32 · 512px (validated v2 recipe)":"~100轮 · rank 32 · 512px(已验证v2配方)",
+    "Crop strategy how non-square images fit the training canvas":"裁剪策略:非方形图如何填入训练画布","scale + crop to square · best for tight portraits":"缩放+裁剪为方形 · 最适合紧凑人像","pad with black · keeps wide-shot proportions":"用黑色填充 · 保持宽镜头比例",
+    "Voice optional · a short clean clip becomes the character's voice":"语音(可选)· 一段干净短clip成为角色声音","Drop a voice clip here, or click to browse":"拖放语音clip,或点击浏览","MP3, WAV, M4A or FLAC — any format, auto-decoded. One file, up to 50 MB.":"MP3/WAV/M4A/FLAC — 任意格式,自动解码。一个文件,最大50MB。",
+    "Aim for 10–25 seconds of clean speech, single speaker, no music or background noise.":"建议10-25秒干净语音,单人,无音乐或背景噪音。","Shorter than 5 s won't train well; longer than 30 s just adds repetition.":"短于5秒训练效果差;长于30秒只是重复。",
+    "Generate a video with your trained characters on the Video tab — the links below take you to each character's picker chip.":"在视频标签用你训练的角色生成视频","Trained LoRAs land in mlx_models/loras/ alongside any LoRAs you've downloaded — they show up in the regular picker too.":"训练好的风格模型保存在mlx_models/loras/",
+    "Generate something on the left and the result lands here.":"在左侧生成内容,结果会显示在这里。","Outputs · 0 photos":"输出 · 0张图","All":"全部",
+    "prompt → video":"提示词 → 视频","trained face + voice":"训练的人脸+语音","image + prompt":"图片+提示词","first + last":"首+尾帧","3–8 frames":"3-8帧","continue a clip":"延续片段","your media → new video":"你的素材 → 新视频",
+    "Describe the scene AND the sound — e.g. wizard in a forest clearing, fireflies spiraling up · low whispered chant, ember crackle, distant owl. Audio is generated jointly with video; without sound cues the model outputs near-silent ambient.":"描述场景和声音 — 如:森林空地上的巫师,萤火虫盘旋·低声吟唱,柴火噼啪,远处猫头鹰。音频与视频联合生成;无声音提示则输出近乎静音的环境音。",
+    "Duration (s)":"时长(秒)","Batch":"批量","5.00s · 1024×576":"5.00秒 · 1024×576","5.00s · 1024×576 → 1280×720 fit":"5.00秒 · 1024×576 → 适配1280×720",
+    "640×480 · ~2 min":"640×480 · ~2分钟","1024×576 · ~5 min":"1024×576 · ~5分钟","1280×704 · ~8 min":"1280×704 · ~8分钟","1024×576 · ~7 min":"1024×576 · ~7分钟",
+    "Install Q8 (37 GB)":"安装Q8(37GB)","Q4 · 5 min":"Q4 · 5分钟","No jobs queued. Generate something on the left.":"没有排队任务。在左侧生成内容。",
+    "Models ready · 2/6":"模型就绪 · 2/6","All installed weights detected · 4 optional missing. Manage models →":"已检测到所有必需权重 · 缺4个可选。管理模型 →","Manage all models →":"管理所有模型 →",
+    "audio drives the generation · WAV / MP3 / M4A / FLAC":"音频驱动生成 · WAV/MP3/M4A/FLAC","Drop a WAV / MP3 / M4A / FLAC here, or click to pick a file.":"拖放WAV/MP3/M4A/FLAC,或点击选择文件。",
+    "optional · anchors frame 0 like I2V":"可选 · 像图生视频一样锚定第0帧","PNG / JPG / WEBP — anchors frame 0 of the audio-driven clip":"PNG/JPG/WEBP — 锚定音频clip的第0帧",
+    "Leave empty for pure Audio → Video. Add an image to open the clip on that frame (e.g. a portrait for a talking-head shot).":"留空则纯音频→视频。加图片则从该帧开始。",
+    "A photoreal medium close-up of a woman speaking to camera, soft daylight, shallow depth of field, natural skin pores":"一位女性对镜头说话的写实中近景,柔和日光,浅景深",
+    "Audio conditioning strength":"音频条件强度","Higher = stronger audio adhesion, lower visual flexibility":"越高=音频贴合越强,视觉灵活性越低",
+    "Reference image(s) — for image-to-image (Reference Edit)":"参考图 — 用于图生图(参考编辑)","Drop a photo to edit/transform it · 2-3 subjects: Qwen Edit (reliable) · HiDream Dev (fragile)":"拖放照片来编辑/变换 · Qwen编辑(稳定)·HiDream(不稳定)",
+    "Drop · click":"拖放·点击","place":"地点","Candidates (n)":"候选数(n)","~1m 25s":"~1分25秒","NEW":"新",
+    "Reference Edit — Fast (image-to-image, Lightning 4-step, ~1:20, default, multi-ref)":"参考编辑 — 快速(图生图,Lightning 4步,~1:20,默认,多参考)",
+    "Generate · downloads ~24 GB first":"生成 · 先下载约24GB","character":"角色","style":"风格",
+    "Each row shows what's on disk. Click 下载 to fetch missing files via hf download; progress streams to the log at the bottom of the page.":"每行显示硬盘上已有的文件。点下载获取缺失文件；进度显示在页面底部日志。",
+    "LTX 2.3 — Q4 (base model, distilled) · required":"LTX 2.3 — Q4（基础模型,蒸馏版）· 必需","Ready · 7 files · ~20 GB · local · Required. Drives Quick / Balanced / Standard renders.":"就绪 · 7个文件 · ~20GB · 本地 · 必需。驱动快速/均衡/标准渲染。",
+    "Gemma 3 12B (4-bit text encoder) · required":"Gemma 3 12B（4位文本编码器）· 必需","Ready · 4 files · ~6 GB · local · Required. Encodes the prompt for the diffusion model.":"就绪 · 4个文件 · ~6GB · 本地 · 必需。为扩散模型编码提示词。",
+    "LTX 2.3 — Q8 (high-quality + FFLF) · optional":"LTX 2.3 — Q8（高画质+FFLF）· 可选","Not installed · ~37 GB · Optional. Unlocks High quality and keyframe (FFLF) interpolation.":"未安装 · ~37GB · 可选。解锁高画质和关键帧（FFLF）插值。",
+    "Colorize IC-LoRA (community) · optional":"黑白上色 IC-LoRA（社区版）· 可选","Not installed · ~1 GB · Optional. Powers the Colorize restore mode — adds natural color to a B&W source clip. Un-gated community weights (no HF token).":"未安装 · ~1GB · 可选。驱动黑白上色模式 — 为黑白片添加自然色彩。无需HF令牌。",
+    "Ingredients IC-LoRA · optional":"素材合成 IC-LoRA · 可选","Not installed · ~2 GB · Optional. Powers the Ingredients mode — composes 2-8 reference images (face + prop + location) into one new video. Un-gated mirror of the official weight (no HF token).":"未安装 · ~2GB · 可选。驱动素材模式 — 将2-8张参考图合成新视频。无需HF令牌。",
+    "Control IC-LoRA (Union, official) · optional":"动作控制 IC-LoRA（官方版）· 可选","Not installed · ~1 GB · Optional. Powers the Control mode — drives motion/structure/composition from a control video. Official un-gated Lightricks weight (no HF token).":"未安装 · ~1GB · 可选。驱动控制模式 — 从控制视频驱动动作/结构/构图。官方权重,无需HF令牌。",
+    "Hailuo H3 (MiniMax-H3 FL2VA) · optional":"海螺 H3（MiniMax-H3 FL2VA）· 可选","Second video engine — joint video + dialogue + sound":"第二视频引擎 — 视频+对话+声音联合生成","Not installed · install from the Pinokio sidebar · ~75 GB · needs 64 GB unified memory · MiniMax Community License (territory restrictions apply)":"未安装 · 从Pinokio侧边栏安装 · ~75GB · 需64GB统一内存 · MiniMax社区许可证",
+    "required":"必需","optional":"可选","local":"本地","Ready":"就绪","Not installed":"未安装","How to install":"如何安装",
+    "Required for training. Standard inference uses the distilled transformer instead; the dev transformer has the right flow-matching schedule for LoRA-from-images training. Must be the full-precision (~21 GB) copy — a quantized dev transformer trains a LoRA that never applies.":"训练所需。标准推理用蒸馏版;dev版有正确的flow-matching调度用于图训练LoRA。必须是全精度(~21GB)版 — 量化版训练出的LoRA无法应用。",
+    "Phosphene's default install ships only the inference model. The dev transformer is needed for training and is downloaded on demand to keep the base install lean.":"Phosphene默认只装推理模型。dev版用于训练,按需下载以保持基础安装精简。",
+    "Dataset 15-50 stills · drop your character into the box":"数据集 15-50张静态图 · 把角色拖到框里","Drop 15-50 images + optional matching .txt captions here, or click to browse":"拖放15-50张图片+可选.txt字幕,或点击浏览",
+    "PNG / JPG / WEBP for images, .txt for captions (same filename stem). Each preview shows the 1:1 center-crop the trainer will see.":"图像用PNG/JPG/WEBP,字幕用.txt(同名)。预览显示训练器看到的1:1中心裁剪。",
+    "LTX [VISUAL]: / [TEXT]:":"LTX [视觉]: / [文本]:","Local Gemma 3 12B writes one [VISUAL]: caption per image (~2–3 sec each). Overwrites existing captions.":"本地Gemma 3 12B为每张图写一条[视觉]字幕(每张~2-3秒)。覆盖现有字幕。",
+    "Use the trigger word in your video prompts (e.g. jqn30 man walking on the beach).":"在视频提示词中用触发词(如:jqn30 man walking on the beach)。",
+    "Voice optional · a short clean clip becomes the character's voice":"语音可选 · 一段干净短clip成为角色声音",
+    "Aim for 10–25 seconds of clean speech, single speaker, no music or background noise. Shorter than 5 s won't train well; longer than 30 s just adds repetition.":"建议10-25秒干净语音,单人,无音乐/噪音。短于5秒效果差;长于30秒只是重复。",
+    "A 5–30 second voice clip (clean, single speaker) gives the character its own voice. Skip this and the character will be silent — you can still use them for video but they won't speak/sing.":"5-30秒语音clip给角色自己的声音。跳过则静音 — 仍可用于视频但不会说话/唱歌。",
+    "Audio → Video uses audio conditioning during generation (not post-hoc mux). Some seeds may not work properly — retry if the mouth doesn't move.":"音频→视频在生成时用音频条件(非后期合成)。某些种子不正常 — 嘴不动就重试。",
+    "Duration 5.00s @ 24fps · 1024×576 → 1280×720 fit · Steps 8":"时长5.00秒 @ 24fps · 1024×576 → 适配1280×720 · 步数8",
+    "Outputs · 1 videos":"输出 · 1个视频","Outputs · 0 videos":"输出 · 0个视频","helper idle":"助手空闲","queue 0":"队列 0","Comfortable":"舒适","by Bizarro":"作者 Bizarro",
+    "Pick at least 1 reference image (drop a file into one of the 3 slots above) — Qwen-Image-Edit composes against an image, it cannot run text-only. Use the Lightning preset only after picking a ref.":"至少选1张参考图(拖到上面3个槽之一) — Qwen编辑需图片,不能纯文本。选好参考图后再用Lightning预设。",
+    "Update check is paused: local changes uncommitted.":"更新检查已暂停:本地有未提交的改动。",
+    "dirty tree":"已修改(本地改动)",
+    "What this Mac can do · Comfortable":"这台Mac的能力 · 舒适档","Comfortable · 48–79 GB of memory":"舒适档 · 48-79GB内存",
+    "This Mac has 48–79 GB of unified memory. Every video mode works. Text-to-video and image-to-video run at the full 1280×704. The two biggest modes (first-last-frame interpolation and extending an existing clip) cap their video size at 768 pixels on the longer side because the bigger model behind them runs out of memory above that. 48 GB machines use a compact LoRA training profile so training does not fall into multi-hour swap thrash.":"此Mac有48-79GB统一内存。所有视频模式可用。文生视频和图生视频可跑满1280×704。两个最大模式(首尾帧插值和延长片段)视频上限768像素,因更大模型会内存不足。48GB机器用紧凑LoRA训练配置。",
+    "Type a prompt, get a clip. The default mode.":"输入提示词,生成片段。默认模式。",
+    "Drop in a still, get it animated. Same speed as text → video.":"拖入静态图,让它动起来。速度同文生视频。",
+    "Smaller preview to scout prompts and seeds before a full-size render.":"较小预览,用于测试提示词和种子。",
+    "Bigger model, two-stage denoising, sharper faces. Needs the optional Q8 download.":"更大模型,两阶段去噪,人脸更清晰。需下载可选的Q8。",
+    "Pick a start image and an end image, the model fills the motion between.":"选起始图和结束图,模型补全中间动作。",
+    "Pick a video you already rendered, the model adds more time onto either end.":"选已渲染的视频,模型在两端添加时间。",
+    "Up to 768 pixels on the longer side":"长边最大768像素","· ~ about 8 min for a 5-second clip":"· ~约8分钟/5秒片段","· ~ about 2 min for a 5-second clip":"· ~约2分钟/5秒片段",
+    "· ~ about 7 min for a 5-second clip":"· ~约7分钟/5秒片段","· ~ about 6 min (at 768 px) for a 5-second clip":"· ~约6分钟(768px)/5秒片段","· ~ about 16 min (at 768 px, +3 s) for a 5-second clip":"· ~约16分钟(768px,+3秒)/5秒片段",
+    "Set LTX_TIER_OVERRIDE=base|standard|high|pro in the env to force a tier (useful for testing what other users see).":"设环境变量LTX_TIER_OVERRIDE可强制档位。",
+    "Pick how rendered clips are encoded. Settings are saved to panel_settings.json and apply to every new render. Files already in the gallery are not re-encoded.":"选择渲染片段编码方式。设置保存到panel_settings.json。",
+    "Switch the core UI between English and Chinese. Takes effect instantly.":"在英文和中文间切换核心界面。即时生效。",
+    "Controls the VAE decode path after denoising. Fast uses more unified memory on medium clips; Safe streams decode to reduce peak RAM.":"控制去噪后VAE解码路径。快速用更多内存;安全用流式解码降峰值。",
+    "Use the faster path when this Mac has headroom, stream decode when clips get long or memory pressure rises.":"此Mac有余量时用快速路径,内存紧张时用流式。",
+    "Verify model files (checksum)":"校验模型文件(校验和)",
+    "Verify every installed model weight against the official checksums on Hugging Face. A file that's the right size but the wrong content — an interrupted, mirrored, or stale download — decodes to garbled / mosaic video. This catches it and offers a one-click re-download. Takes 1–2 minutes (it hashes every file).":"对照官方校验和验证每个模型权重。大小对内容错的文件(中断/过期下载)会花屏。此功能检测并一键重下。",
+    "Saved locally in panel_settings.json. Never sent anywhere except as auth headers to civitai.com / huggingface.co. Power users can override with CIVITAI_API_KEY / HF_TOKEN env vars; the saved value here wins when both are set.":"本地保存。只作为认证头发送到civitai.com/huggingface.co。",
+    "saved":"已保存","•••••••••• saved — paste new to replace":"已保存 — 粘贴新的替换","show":"显示","save & test":"保存并测试","clear":"清除","not set":"未设置",
+    "Required for installing CivitAI LoRAs. Get one at civitai.com/user/account (Account → API Keys → Add).":"安装CivitAI风格模型必需。在civitai.com/user/account获取。",
+    "Required for gated LoRAs (Lightricks HDR + Control LoRAs). Get one at huggingface.co/settings/tokens — read access is enough.":"受限风格模型必需。在huggingface.co/settings/tokens获取 — 只读即可。",
+    "When OFF, the CivitAI LoRA browser hides NSFW models entirely. When ON, you can choose per-search whether to include NSFW results.":"关闭时CivitAI浏览器完全隐藏NSFW。开启时可每次搜索选择。",
+    "Sends anonymous counts so bugs get noticed: panel version, hardware class, installed packs, render engine/tier/resolution/frames/duration. Never prompts/filenames/paths/images/video.":"发送匿名统计以便发现bug:版本/硬件/引擎/分辨率/帧数/时长。绝不发送提示词/文件/图片。",
+    "Turn off":"关闭","On, but no project key is configured — this panel is sending nothing over the network. Events are only written to the local log.":"已开但未配密钥 — 不发送网络数据。仅写本地日志。",
+    "Required: 2/2 ready  ·  Optional: 0/4 ready":"必需: 2/2就绪 · 可选: 0/4就绪","Tip: downloads resume on retry — closing this dialog mid-download keeps it running in the background.":"提示:重试续传 — 关闭对话框不影响后台下载。",
+    "Auto":"自动","Cancel":"取消"
+  };
+  const I18N_ATTR = 'data-i18n-en';  // stores original English for restore
+  function translateNode(node){
+    if (!node || node.nodeType !== 1) return;
+    // Skip script/style elements
+    const tag = node.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE') return;
+    // Translate the element's own direct text (not children's)
+    const directText = Array.from(node.childNodes)
+      .filter(n => n.nodeType === 3)
+      .map(n => n.nodeValue.trim())
+      .join('').trim();
+    if (directText && ZH[directText]) {
+      if (!node.getAttribute(I18N_ATTR)) node.setAttribute(I18N_ATTR, directText);
+      // Replace only the direct text nodes
+      node.childNodes.forEach(n => { if(n.nodeType===3 && n.nodeValue.trim()) n.nodeValue = ZH[n.nodeValue.trim()] || n.nodeValue; });
+    }
+    // Translate placeholder/title attributes (exact match only)
+    ['placeholder','title'].forEach(attr => {
+      const v = node.getAttribute(attr);
+      if (v && ZH[v.trim()]) node.setAttribute(attr, ZH[v.trim()]);
+    });
+  }
+  function restoreNode(node){
+    if (!node || node.nodeType !== 1) return;
+    const tag = node.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE') return;
+    const orig = node.getAttribute(I18N_ATTR);
+    if (orig) {
+      node.childNodes.forEach(n => { if(n.nodeType===3 && n.nodeValue.trim()) n.nodeValue = orig; });
+      node.removeAttribute(I18N_ATTR);
+    }
+  }
+  let currentLang = 'en';
+  function applyLang(lang){
+    currentLang = lang;
+    localStorage.setItem('phosphene-lang', lang);
+    const sel = document.getElementById('langSelect');
+    if (sel) sel.value = lang;
+    const fn = lang === 'zh' ? translateNode : restoreNode;
+    // Walk all elements once
+    document.querySelectorAll('button,span,label,h1,h2,h3,h4,p,option,a,div,legend,strong,em,li,input,select').forEach(fn);
+  }
+  // MutationObserver: translate dynamically added nodes
+  let observer;
+  function startObserver(){
+    if (observer) observer.disconnect();
+    observer = new MutationObserver(muts => {
+      if (currentLang !== 'zh') return;
+      muts.forEach(m => m.addedNodes.forEach(n => {
+        if (n.nodeType !== 1) return;
+        translateNode(n);
+        n.querySelectorAll && n.querySelectorAll('button,span,label,h1,h2,h3,h4,p,option,a,div,legend,strong,em,li,input,select').forEach(translateNode);
+      }));
+    });
+    observer.observe(document.body, {childList:true, subtree:true});
+  }
+  // Public API
+  window.PhospheneI18N = { applyLang, getLang: () => currentLang };
+  // Init on DOM ready
+  function init(){
+    const saved = localStorage.getItem('phosphene-lang') || 'en';
+    if (saved === 'zh') { applyLang('zh'); }
+    startObserver();
+    const sel = document.getElementById('langSelect');
+    if (sel) {
+      sel.value = saved;
+      sel.addEventListener('change', e => applyLang(e.target.value));
+    }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
+</script>
+"""
+
+
 def page() -> str:
     cap_tier = _resolve_cap_tier()
     bootstrap = json.dumps({
@@ -18563,7 +18836,8 @@ def page() -> str:
             # file now — the same source /version and the update pill use.
             .replace("__PANEL_VERSION__", html.escape(_read_local_version() or "dev"))
             .replace("__ENGINE_RULES__", _engine_css())
-            .replace("__CAP_TIER__", cap_tier))
+            .replace("__CAP_TIER__", cap_tier)
+            .replace("__I18N_JS__", _i18n_script()))
 
 
 HTML = r"""<!doctype html>
@@ -26137,6 +26411,17 @@ HTML = r"""<!doctype html>
             </div>
             <div class="quality-strip pill-group" id="h3LengthGroup"></div>
           </div>
+          <!-- H3 自定义尺寸(覆盖档位预设) — 32倍数,上限1344×768 -->
+          <div id="h3CustomDims" data-h3-only hidden style="display:none;align-items:center;gap:8px;margin:4px 0 6px 0;padding:0 2px;">
+            <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600;flex:0 0 auto;">自定义尺寸</span>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="number" id="h3CustomW" min="32" max="1344" step="32" placeholder="宽" style="width:70px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
+              <span style="color:var(--muted);">×</span>
+              <input type="number" id="h3CustomH" min="32" max="768" step="32" placeholder="高" style="width:70px;padding:4px 8px;font-size:12px;border-radius:6px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;">
+              <button type="button" id="h3CustomApply" style="padding:4px 10px;font-size:11px;border-radius:6px;cursor:pointer;white-space:nowrap;">应用</button>
+              <span id="h3CustomHint" style="font-size:10px;color:var(--muted);"></span>
+            </div>
+          </div>
           <!-- Honest artefact notes for the selected combination. Rendered from
                the cell's `notes` list (server-side), so a Draft 10 s clip is
                told BOTH that 0.25 MP doesn't resolve faces and that one prompt
@@ -26301,15 +26586,14 @@ HTML = r"""<!doctype html>
              dig for it. Compact 2-pill row reusing the same id="aspect"
              hidden input + id="aspectGroup" click delegation + id="aspectRow"
              container that setQuality() hides when quality=quick. -->
-        <div class="mode-only show" id="aspectRow" data-ltx-only style="display:flex;align-items:center;gap:10px;margin:6px 0 8px 0;padding:0 2px;">
-          <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600;flex:0 0 auto;">Orientation</span>
-          <div class="pill-group" id="aspectGroup" style="display:flex;gap:4px;flex:0 0 auto;">
-            <button type="button" class="pill-btn active" data-aspect="landscape" title="Landscape 16:9" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:center;">
-              <svg class="ph orient-icon" aria-hidden="true" style="width:14px;height:14px;transform:rotate(90deg);"><use href="#ph-device-mobile"/></svg><span>16:9</span>
-            </button>
-            <button type="button" class="pill-btn" data-aspect="vertical" title="Vertical 9:16" style="padding:4px 10px;font-size:12px;display:inline-flex;gap:6px;align-items:center;">
-              <svg class="ph orient-icon" aria-hidden="true" style="width:14px;height:14px;"><use href="#ph-device-mobile"/></svg><span>9:16</span>
-            </button>
+        <div class="mode-only show" id="aspectRow" data-ltx-only style="display:flex;align-items:center;gap:8px;margin:6px 0 8px 0;padding:0 2px;">
+          <span style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600;flex:0 0 auto;">方向</span>
+          <div class="pill-group" id="aspectGroup" style="display:flex;gap:6px;flex:1 1 auto;flex-wrap:wrap;">
+            <button type="button" class="pill-btn active" data-aspect="landscape" title="横屏 16:9 (1280×704)" style="padding:5px 12px;font-size:12px;font-weight:500;border-radius:6px;white-space:nowrap;">16:9 横屏</button>
+            <button type="button" class="pill-btn" data-aspect="vertical" title="竖屏 9:16 (704×1280)" style="padding:5px 12px;font-size:12px;font-weight:500;border-radius:6px;white-space:nowrap;">9:16 竖屏</button>
+            <button type="button" class="pill-btn" data-aspect="square" title="正方形 1:1 (768×768)" style="padding:5px 12px;font-size:12px;font-weight:500;border-radius:6px;white-space:nowrap;">1:1 方形</button>
+            <button type="button" class="pill-btn" data-aspect="wide" title="超宽 21:9 (1408×608)" style="padding:5px 12px;font-size:12px;font-weight:500;border-radius:6px;white-space:nowrap;">21:9 超宽</button>
+            <button type="button" class="pill-btn" data-aspect="portrait" title="手机竖屏 (576×1024)" style="padding:5px 12px;font-size:12px;font-weight:500;border-radius:6px;white-space:nowrap;">手机竖屏</button>
           </div>
           <input type="hidden" name="aspect" id="aspect" value="landscape">
         </div>
@@ -28084,6 +28368,17 @@ HTML = r"""<!doctype html>
       Pick how rendered clips are encoded. Settings are saved to
       <code>panel_settings.json</code> and apply to every new render.
       Files already in the gallery are not re-encoded.
+    </div>
+
+    <div class="settings-section">
+      <h3>Language / 语言</h3>
+      <div class="hint" style="margin-bottom:8px">
+        Switch the core UI between English and Chinese. Takes effect instantly.
+      </div>
+      <select id="langSelect" style="padding:8px 12px;font-size:14px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer">
+        <option value="en">English</option>
+        <option value="zh">中文</option>
+      </select>
     </div>
 
     <div class="settings-section">
@@ -33311,17 +33606,28 @@ function setQuality(q) {
   document.getElementById('quality').value = q;
   document.querySelectorAll('#qualityGroup .pill-btn').forEach(b => b.classList.toggle('active', b.dataset.quality === q));
   // Set canonical dimensions for the preset, respecting the current
-  // aspect choice. Quick is 4:3 only — landscape orientation only.
+  // aspect choice. 方向选择现在独立于画质——所有画质档都支持所有方向。
   const preset = QUALITY_PRESETS[q];
   const aspect = document.getElementById('aspect').value || 'landscape';
-  const vertical = (aspect === 'vertical' && q !== 'quick');
-  document.getElementById('width').value  = vertical ? preset.h : preset.w;
-  document.getElementById('height').value = vertical ? preset.w : preset.h;
+  // 竖屏方向(9:16/手机):宽高互换
+  const vertical = (aspect === 'vertical' || aspect === 'portrait');
+  // 正方形:宽高相同
+  const square = (aspect === 'square');
+  if (square) {
+    const sq = Math.min(preset.w, preset.h);
+    document.getElementById('width').value  = sq;
+    document.getElementById('height').value = sq;
+  } else if (vertical) {
+    document.getElementById('width').value  = preset.h;
+    document.getElementById('height').value = preset.w;
+  } else {
+    document.getElementById('width').value  = preset.w;
+    document.getElementById('height').value = preset.h;
+  }
   setUpscale(preset.upscale || 'off');
-  // Hide the Aspect row when Quick is active (only 4:3 supported); show
-  // it for Standard/High where 16:9 vs 9:16 is a real choice.
+  // 方向选择永远显示(之前快速档会隐藏,现在所有档都可选)
   const aspectRow = document.getElementById('aspectRow');
-  if (aspectRow) aspectRow.style.display = (q === 'quick') ? 'none' : '';
+  if (aspectRow) aspectRow.style.display = '';
   applyQuality();
   updateAccelAvailability();
   updateTemporalAvailability();
@@ -33539,6 +33845,8 @@ document.querySelectorAll('#upscaleGroup .pill-btn').forEach(b => b.onclick = ()
 document.querySelectorAll('#upscaleMethodGroup .pill-btn').forEach(b => b.onclick = () => { if (!b.classList.contains('disabled')) setUpscaleMethod(b.dataset.method); });
 document.querySelectorAll('#aspectGroup .pill-btn').forEach(b => b.onclick = () => setAspect(b.dataset.aspect));
 document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick = () => setExtendMode(b.dataset.extendMode));
+// H3 自定义尺寸应用按钮
+(function(){ const btn=document.getElementById('h3CustomApply'); if(btn) btn.onclick = h3ApplyCustomDims; })();
 
 // ============================================================================
 // Engine registry — the header switcher and every gate behind it
@@ -34489,6 +34797,43 @@ function setH3Tier(key) {
 }
 
 // ============================================================================
+// H3 自定义尺寸 — 覆盖档位预设,clamp 到 32 倍数 + 上限 1344×768
+// ============================================================================
+function h3ApplyCustomDims() {
+  const wEl = document.getElementById('h3CustomW');
+  const hEl = document.getElementById('h3CustomH');
+  const hint = document.getElementById('h3CustomHint');
+  if (!wEl || !hEl) return;
+  let w = parseInt(wEl.value, 10);
+  let h = parseInt(hEl.value, 10);
+  if (!w || !h || w < 32 || h < 32) {
+    if (hint) hint.textContent = '请输入有效尺寸(最小32)';
+    return;
+  }
+  // clamp 到 32 倍数
+  w = Math.round(w / 32) * 32;
+  h = Math.round(h / 32) * 32;
+  // 上限 1344×768(H3 模型 MAX_PIXELS)
+  const MAX_W = 1344, MAX_H = 768;
+  if (w > MAX_W) { w = MAX_W; }
+  if (h > MAX_H) { h = MAX_H; }
+  wEl.value = w; hEl.value = h;
+  // 写入隐藏字段
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('width', w);
+  set('height', h);
+  if (hint) hint.textContent = '✅ 已设为 ' + w + '×' + h + '(覆盖档位预设)';
+}
+// 引擎切换时显示/隐藏自定义尺寸框
+function _syncH3CustomDimsVisibility() {
+  const el = document.getElementById('h3CustomDims');
+  if (!el) return;
+  const isH3 = (document.body.dataset.engine === 'h3');
+  el.style.display = isH3 ? 'flex' : 'none';
+  el.hidden = !isH3;
+}
+
+// ============================================================================
 // Draft → Finish — re-render this clip at a HIGHER QUALITY, same length
 // ============================================================================
 // Under fixed tiers "Finish" meant "pick another tier", and a tier bundled the
@@ -34883,6 +35228,8 @@ function setEngine(engine, opts) {
       if (h) h.hidden = (x.id !== target);
     }
   });
+  // H3 自定义尺寸框:切引擎时显示/隐藏
+  try { _syncH3CustomDimsVisibility(); } catch (e) {}
   const qLabel = document.getElementById('qualityLabelName');
   if (qLabel) qLabel.textContent = e.strip_label || 'Quality';
   if (target === 'h3') {
@@ -35157,16 +35504,27 @@ document.getElementById('i2vMode').addEventListener('change', () => {
 function applyAspect(key) {
   if (!ASPECTS[key]) return;
   document.getElementById('aspect').value = key;
-  // Aspect controls dimensions only when the active preset has a choice
-  // (Standard / High at 1280×704 vs 704×1280). Quick is fixed 4:3 and
-  // ignores the aspect picker (the row is hidden in that state, so this
-  // path normally won't fire — defensive in case of programmatic calls).
+  // 方向选择独立于画质——所有画质档都支持所有方向。
   const q = document.getElementById('quality').value;
-  if (q === 'quick') return;
   const preset = QUALITY_PRESETS[q] || QUALITY_PRESETS['standard'];
-  const vertical = (key === 'vertical');
-  document.getElementById('width').value  = vertical ? preset.h : preset.w;
-  document.getElementById('height').value = vertical ? preset.w : preset.h;
+  // 用 ASPECTS 表里的宽高作为该方向的基础尺寸,按画质档等比缩放
+  const a = ASPECTS[key];
+  // 竖屏方向(9:16/手机):宽高互换
+  const vertical = (key === 'vertical' || key === 'portrait');
+  // 正方形:宽高相同
+  const square = (key === 'square');
+  if (square) {
+    const sq = Math.round(Math.min(preset.w, preset.h) / 32) * 32;
+    document.getElementById('width').value  = sq;
+    document.getElementById('height').value = sq;
+  } else if (vertical) {
+    document.getElementById('width').value  = preset.h;
+    document.getElementById('height').value = preset.w;
+  } else {
+    // landscape / wide 用 ASPECTS 表的比例
+    document.getElementById('width').value  = a.w;
+    document.getElementById('height').value = a.h;
+  }
   updateCustomizeSummary();
   updateDerived();
 }
@@ -41554,6 +41912,7 @@ try {
 } catch(e) {}
 </script>
 <div class="phos-toast-container" id="phosToast" aria-live="polite" aria-atomic="false"></div>
+__I18N_JS__
 </body>
 </html>
 

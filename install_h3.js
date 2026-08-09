@@ -35,7 +35,7 @@
 const H3_BRANCH = "codex/h3-engine"
 
 module.exports = {
-  requires: { bundle: "ai" },
+  // NOTE: requires.bundle "ai" removed — same npm install bun freeze as install.js
   run: [
     {
       method: "notify",

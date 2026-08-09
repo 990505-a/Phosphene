@@ -94,3 +94,8 @@ __pycache__/
 
 # Claude Preview tool config (per-machine, not Phosphene)
 .claude/
+minimax-h3-mlx
+cache/
+logs/
+*.pyc
+__pycache__/

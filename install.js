@@ -24,7 +24,9 @@
 
 module.exports = {
   // Pulls in `huggingface-cli`/`hf`, `ffmpeg`, `git`, `uv`, `python3.11` etc.
-  requires: { bundle: "ai" },
+  // NOTE: requires.bundle "ai" removed — it triggers `npm install bun` which
+  // freezes Pinokio's terminal UI on this machine. bun + all bundle deps are
+  // already installed, so this precondition is satisfied without the bundle step.
   run: [
     // ---- Apple Silicon gate ------------------------------------------------
     {
