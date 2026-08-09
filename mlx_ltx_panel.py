@@ -19361,9 +19361,12 @@ HTML = r"""<!doctype html>
     .form-pane, .stage-pane {
       background: var(--panel); border: 1px solid var(--border);
       border-radius: var(--radius); overflow: auto;
-      display: flex; flex-direction: column; min-height: 0;
+      display: flex; flex-direction: column; min-height: 0; min-width: 0;
     }
     .form-pane { padding: 16px; overflow-y: auto; overflow-x: auto; }
+    /* 让 form-pane 内的块元素不被 flex 撑爆,超宽时触发横向滚动 */
+    .form-pane > * { min-width: 0; }
+    .form-pane > nav.workflow-tabs { min-width: 0; }
     .stage-pane { padding: 0; }
 
     /* Train Character is its own workflow tier alongside Manual.
@@ -26493,18 +26496,18 @@ HTML = r"""<!doctype html>
           <!-- H3 尺寸控制:第1行选比例,第2行选系数 -->
           <div id="h3CustomDims" data-h3-only hidden style="display:none;flex-direction:column;gap:6px;margin:4px 0 6px 0;padding:8px 10px;background:var(--bg-2,#16161c);border:1px solid var(--border,#333);border-radius:10px;">
             <!-- 第1行:画面比例 -->
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;">
               <span style="font-size:12px;color:var(--muted);font-weight:700;flex:0 0 auto;">比例</span>
-              <div style="display:flex;gap:4px;flex-wrap:wrap;" id="h3RatioChips">
+              <div style="display:flex;gap:4px;flex:0 0 auto;" id="h3RatioChips">
                 <button type="button" class="ratio-chip" data-ratio="169" style="padding:5px 10px;font-size:12px;border-radius:8px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;white-space:nowrap;">🖥️ 16:9</button>
                 <button type="button" class="ratio-chip" data-ratio="916" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">📱 9:16</button>
                 <button type="button" class="ratio-chip" data-ratio="11" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">⬛ 1:1</button>
               </div>
             </div>
-            <!-- 第2行:清晰度系数 + 结果 -->
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <!-- 第2行:清晰度系数 -->
+            <div style="display:flex;align-items:center;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;">
               <span style="font-size:12px;color:var(--muted);font-weight:700;flex:0 0 auto;">清晰度</span>
-              <div style="display:flex;gap:4px;flex-wrap:wrap;" id="h3MpChips">
+              <div style="display:flex;gap:4px;flex:0 0 auto;" id="h3MpChips">
                 <button type="button" class="mp-chip" data-mp="0.2" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">0.2</button>
                 <button type="button" class="mp-chip" data-mp="0.4" style="padding:5px 10px;font-size:12px;border-radius:8px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;white-space:nowrap;">0.4</button>
                 <button type="button" class="mp-chip" data-mp="0.6" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">0.6</button>
