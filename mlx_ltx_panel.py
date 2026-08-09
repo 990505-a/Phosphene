@@ -24798,17 +24798,18 @@ HTML = r"""<!doctype html>
        chips: pills 28 → 34, icon-btn 26 → 34, "by Bizarro" 24 → 34
        — everything else needed to scale with the bigger brand. */
     body > header {
-      height: 88px;
+      min-height: 88px;
       flex: 0 0 auto;
       padding: 0 22px;
       gap: 14px;
-      flex-wrap: nowrap;
+      flex-wrap: wrap;
       align-items: center;
       border-bottom: 1px solid var(--ph-border-soft);
       background: rgba(0, 6, 26, 0.6);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
-      overflow: hidden;
+      overflow-x: auto;
+      overflow-y: visible;
     }
     body > header .brand {
       display: inline-flex;
