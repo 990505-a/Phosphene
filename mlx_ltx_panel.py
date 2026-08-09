@@ -9818,8 +9818,16 @@ def make_job(form: dict[str, list[str]] | dict[str, str], *,
     # runner that snaps frames to the 17n+5 grid.
     if _engine == "h3":
         _tier_cfg = H3_TIERS[_h3_tier]
-        job["params"]["width"] = _tier_cfg["width"]
-        job["params"]["height"] = _tier_cfg["height"]
+        # 自定义尺寸(比例+系数控件):如果前端传了自定义 width/height,优先用它
+        # 否则回退到 tier 配置
+        _custom_w = int(p.get("width") or 0)
+        _custom_h = int(p.get("height") or 0)
+        if _custom_w >= 256 and _custom_h >= 144:
+            job["params"]["width"] = _custom_w
+            job["params"]["height"] = _custom_h
+        else:
+            job["params"]["width"] = _tier_cfg["width"]
+            job["params"]["height"] = _tier_cfg["height"]
         # DELIVERED frames — for a chained tier that is the stitched total, not
         # the per-window count, so the queue card and the duration line read the
         # clip the user actually gets. run_h3_job_inner splits it back out.
@@ -34762,6 +34770,8 @@ function _h3ApplyShape(qualityKey, lengthKey, opts) {
   if (typeof renderH3Turbo === 'function') { try { renderH3Turbo(); } catch (e) {} }
   if (typeof updateDerived === 'function') { try { updateDerived(); } catch (e) {} }
   if (typeof updateCustomizeSummary === 'function') { try { updateCustomizeSummary(); } catch (e) {} }
+  // 自定义尺寸控件(比例+系数):把 _h3ApplyShape 设置的 tier 尺寸覆盖回我们的值
+  if (typeof h3ApplyDims === 'function') { try { h3ApplyDims(); } catch (e) {} }
 }
 
 // ---- Per-window prompts -----------------------------------------------------
