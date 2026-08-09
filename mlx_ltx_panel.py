@@ -26511,6 +26511,8 @@ HTML = r"""<!doctype html>
                 <button type="button" class="ratio-chip" data-ratio="169" style="padding:5px 10px;font-size:12px;border-radius:8px;border:2px solid var(--accent,#5a7cff);background:var(--accent,#5a7cff);color:#fff;cursor:pointer;font-weight:700;white-space:nowrap;">🖥️ 16:9</button>
                 <button type="button" class="ratio-chip" data-ratio="916" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">📱 9:16</button>
                 <button type="button" class="ratio-chip" data-ratio="11" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">⬛ 1:1</button>
+                <button type="button" class="ratio-chip" data-ratio="43" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">📺 4:3</button>
+                <button type="button" class="ratio-chip" data-ratio="34" style="padding:5px 10px;font-size:12px;border-radius:8px;border:1px solid var(--border,#444);background:var(--bg-2,#1c1c1e);color:inherit;cursor:pointer;font-weight:600;white-space:nowrap;">📄 3:4</button>
               </div>
             </div>
             <!-- 第2行:清晰度系数 -->
@@ -34946,6 +34948,8 @@ function h3CalcDims(ratio, mp) {
   let rw, rh;
   if (ratio === '916')      { rw = 9;  rh = 16; }
   else if (ratio === '11')  { rw = 1;  rh = 1;  }
+  else if (ratio === '43')  { rw = 4;  rh = 3;  }
+  else if (ratio === '34')  { rw = 3;  rh = 4;  }
   else                       { rw = 16; rh = 9;  }
   let w = Math.round(Math.sqrt(targetPixels * rw / rh));
   let h = Math.round(Math.sqrt(targetPixels * rh / rw));
@@ -34966,7 +34970,7 @@ function h3ApplyDims() {
   // 显示:比例 × 系数 = 分辨率
   const hint = document.getElementById('h3MpHint');
   if (hint) hint.textContent = w + '×' + h;
-  const ratioNames = { '169': '16:9', '916': '9:16', '11': '1:1' };
+  const ratioNames = { '169': '16:9', '916': '9:16', '11': '1:1', '43': '4:3', '34': '3:4' };
   const rLabel = document.getElementById('h3RatioLabel');
   if (rLabel) rLabel.textContent = ratioNames[h3CurrentRatio] || '16:9';
   const mLabel = document.getElementById('h3MpLabel');
