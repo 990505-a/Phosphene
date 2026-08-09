@@ -33989,8 +33989,12 @@ document.querySelectorAll('#extendModeGroup .pill-btn').forEach(b => b.onclick =
   document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
     c.onclick = () => h3SetMp(parseFloat(c.dataset.mp));
   });
-  // 初始化默认:16:9 + 0.4
-  setTimeout(() => { h3SetRatio('169'); h3SetMp(0.4); }, 100);
+  // 初始化:从 localStorage 恢复或默认 16:9 + 0.4
+  setTimeout(() => {
+    const sr = localStorage.getItem('h3_custom_ratio') || '169';
+    const sm = parseFloat(localStorage.getItem('h3_custom_mp') || '0.4');
+    h3SetRatio(sr); h3SetMp(sm);
+  }, 100);
 })();
 
 // ============================================================================
@@ -35012,6 +35016,7 @@ function h3ApplyDims() {
 
 function h3SetRatio(ratio) {
   h3CurrentRatio = ratio;
+  try { localStorage.setItem('h3_custom_ratio', ratio); } catch(e) {}
   document.querySelectorAll('#h3RatioChips .ratio-chip').forEach(c => {
     const active = c.dataset.ratio === ratio;
     c.style.borderWidth = active ? '2px' : '1px';
@@ -35025,6 +35030,7 @@ function h3SetRatio(ratio) {
 
 function h3SetMp(mp) {
   h3CurrentMp = mp;
+  try { localStorage.setItem('h3_custom_mp', String(mp)); } catch(e) {}
   document.querySelectorAll('#h3MpChips .mp-chip').forEach(c => {
     const active = Math.abs(parseFloat(c.dataset.mp) - mp) < 0.001;
     c.style.borderWidth = active ? '2px' : '1px';
@@ -38593,11 +38599,11 @@ document.getElementById('genForm').addEventListener('submit', async e => {
     fd.set('character_id', '');      // character LoRAs are an LTX construct
     fd.set('loras', '');             // ditto — the H3 runner stacks nothing
     fd.set('no_voice', '');          // only ever meant "skip the character's voice LoRA"
-    // 自定义尺寸控件(比例+系数):从 DOM 读选中项,强制覆盖 width/height
-    const _ar = document.querySelector('#h3RatioChips .ratio-chip[data-active="1"]');
-    const _am = document.querySelector('#h3MpChips .mp-chip[data-active="1"]');
-    if (_ar && _am && typeof h3CalcDims === 'function') {
-      const _cd = h3CalcDims(_ar.dataset.ratio, parseFloat(_am.dataset.mp));
+    // 自定义尺寸控件(比例+系数):从 localStorage 读用户选择,强制覆盖
+    const _cr = localStorage.getItem('h3_custom_ratio') || '169';
+    const _cm = parseFloat(localStorage.getItem('h3_custom_mp') || '0.4');
+    if (typeof h3CalcDims === 'function') {
+      const _cd = h3CalcDims(_cr, _cm);
       fd.set('width', String(_cd.w));
       fd.set('height', String(_cd.h));
     }
