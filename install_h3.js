@@ -32,7 +32,12 @@
 // runner for the flag and keeps Image mode on LTX when it's absent, so an
 // older checkout degrades to Text-only instead of failing mid-render. Bump
 // this pin when the first-frame work is published.
-const H3_BRANCH = "codex/h3-engine"
+// v2 (2026-08-10): --lora (single adapter slot), TAE draft decode, native
+// single-window 10s/15s drafts, Stage-A latent caching, the streaming Q8
+// quantizer for 48 GB Macs, and the LoRA-on-quantized logical-dims fix.
+// Published as a NEW branch: the histories diverged, and force-moving a
+// branch users' installs already track is how updates break mid-clone.
+const H3_BRANCH = "codex/h3-engine-v2"
 
 module.exports = {
   requires: { bundle: "ai" },
@@ -59,15 +64,18 @@ module.exports = {
           // single lines (#50). One shell invocation — the if/else spans lines.
           [
             "MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null)",
-            "if echo \"$MEM_BYTES\" | grep -qE '^[0-9]+$' && [ \"$MEM_BYTES\" -lt 60000000000 ]; then",
+            "if echo \"$MEM_BYTES\" | grep -qE '^[0-9]+$' && [ \"$MEM_BYTES\" -lt 46000000000 ]; then",
             "  MEM_GB=$((MEM_BYTES / 1000000000))",
             "  echo '=================================================================='",
-            "  echo \"HAILUO H3 NEEDS ABOUT 64 GB OF UNIFIED MEMORY (this Mac has ${MEM_GB} GB)\"",
-            "  echo 'The staged runner peaks around 40 GiB with one component resident at'",
-            "  echo 'a time. Below 64 GB it swaps and a 3-second clip takes hours.'",
+            "  echo \"HAILUO H3 NEEDS AT LEAST A 48 GB MAC (this Mac has ${MEM_GB} GB)\"",
+            "  echo 'Even the reduced-RAM Q8 engine peaks around 27 GiB while rendering;'",
+            "  echo 'below 48 GB it swaps and a 3-second clip takes hours.'",
             "  echo 'Nothing was downloaded. Keep using the built-in LTX-2.3 engine.'",
             "  echo '=================================================================='",
             "  exit 1",
+            "elif [ \"$MEM_BYTES\" -lt 60000000000 ]; then",
+            "  echo 'H3 memory preflight OK - 48 GB class: the reduced-RAM Q8 engine'",
+            "  echo 'will be built locally after the weights download (adds ~5 min).'",
             "else",
             "  echo 'H3 memory preflight OK'",
             "fi",
@@ -193,6 +201,60 @@ module.exports = {
         },
         message: [
           ".venv/bin/python scripts/download_selected.py --root '{{cwd}}/mlx_models/hailuo-h3'"
+        ]
+      }
+    },
+
+    // ---- TAE: the fast draft decoder (~23 MB) ------------------------------
+    // H3's video decoder is a 36-layer ViT and it is the biggest FIXED cost in
+    // a render — 88 s of a 501 s clip, 77% of everything that isn't denoising.
+    // madebyollin's TAE replaces it on DRAFT tiers only and takes a 640x384 5 s
+    // draft from ~5 min to ~66 s. 23 MB against a 75 GB pack, so it is not
+    // worth making optional; the panel offers the fast path only when this file
+    // AND the runner flag are both present, and every delivery tier keeps the
+    // untouched full VAE regardless.
+    {
+      method: "shell.run",
+      params: {
+        path: "minimax-h3-mlx",
+        env: {
+          HF_HOME: "{{cwd}}/cache/HF_HOME",
+          HF_XET_HIGH_PERFORMANCE: "1"
+        },
+        message: [
+          "mkdir -p '{{cwd}}/mlx_models/hailuo-h3/models/tae'",
+          ".venv/bin/python -c \"from huggingface_hub import hf_hub_download; import shutil; p=hf_hub_download('madebyollin/taeh3','taeh3.safetensors'); shutil.copy(p, '{{cwd}}/mlx_models/hailuo-h3/models/tae/taeh3.safetensors'); print('TAE draft decoder ready')\""
+        ]
+      }
+    },
+
+    // ---- Reduced-RAM engine (48 GB Macs): build the Q8 DiT locally ---------
+    // The Q8 pack halves the render peak (27.3 vs 42.8 GiB measured), which is
+    // what makes H3 possible on this class of machine at all. Built locally by
+    // quantize_stream.py — bounded memory (never holds more than one tensor,
+    // CPU stream, deterministic), so the build itself runs fine on the same
+    // 48 GB machine that could never load the model whole. ~22 GB on disk,
+    // ~5 min. 64 GB+ Macs skip this: bf16 is the quality default there, and
+    // the panel can build the pack later via Settings if the user wants the
+    // low-RAM mode. Idempotent: the pack's own config files gate the re-run.
+    {
+      method: "shell.run",
+      params: {
+        path: "minimax-h3-mlx",
+        message: [
+          [
+            "MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null)",
+            "PACK='{{cwd}}/mlx_models/hailuo-h3/models/h3-dit-q8'",
+            "SRC='{{cwd}}/mlx_models/hailuo-h3/models/deepbeep-pruned-bf16/MiniMax-H3-FL2VA-pruned_bf16.safetensors'",
+            "if [ -f \"$PACK/quant_config.json\" ]; then",
+            "  echo 'Q8 engine already built - skipping'",
+            "elif echo \"$MEM_BYTES\" | grep -qE '^[0-9]+$' && [ \"$MEM_BYTES\" -lt 60000000000 ]; then",
+            "  echo '=== Building the reduced-RAM Q8 engine (~5 min, one time) ==='",
+            "  .venv/bin/python scripts/quantize_stream.py --src \"$SRC\" --out \"$PACK\"",
+            "else",
+            "  echo '64 GB-class Mac - bf16 engine is the default, Q8 not built'",
+            "fi",
+          ].join("\n")
         ]
       }
     },
